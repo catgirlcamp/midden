@@ -21,7 +21,8 @@ Each pass can:
 
 - Expire due files and delete unreferenced blobs.
 - Expire due pastes.
-- Clean expired sessions, password reset tokens, email verification tokens, two-factor challenges, invite tokens, and OIDC auth state.
+- Clean expired sessions, password reset tokens, email verification tokens, two-factor challenges, invite tokens, OIDC auth state, and spent rate-limit buckets.
+- Reclaim scratch files in the upload temp directory left behind by aborted uploads, timed-out scans, or a hard restart. Only files Midden created are considered, and only once they have gone untouched for `uploads.temp_file_max_age_seconds` (default 24h). Raise that window if you accept uploads slower than it.
 - Retry scanner decisions for candidate files.
 - Extract file metadata.
 - Create thumbnail derivatives.

@@ -63,6 +63,7 @@ async fn run_pass(
     include_storage_verify: bool,
 ) -> anyhow::Result<JobSummary> {
     let mut summary = cleanup_expired(state).await?;
+    summary.deleted_temp_files = cleanup_temp_files(settings).await?;
     let retry_count = retry_scanners(state, settings).await?;
     let metadata_updates = process_file_metadata(state, settings).await?;
     let storage = if include_storage_verify {
@@ -248,6 +249,57 @@ async fn process_file_metadata(
     Ok(updated)
 }
 
+/// Prefixes of the scratch files Midden creates outside the blob store.
+const TEMP_FILE_PREFIXES: [&str; 2] = ["midden-upload-", "midden-scan-"];
+
+/// Removes scratch files left behind by aborted uploads, timed-out scans, and hard restarts.
+///
+/// Nothing else reclaims these: the in-process guards only fire on paths that unwind normally, so
+/// without this the temp directory grows until the disk fills.
+async fn cleanup_temp_files(settings: &RuntimeSettings) -> anyhow::Result<u64> {
+    let directory = settings
+        .uploads
+        .temp_dir
+        .clone()
+        .unwrap_or_else(std::env::temp_dir);
+    let mut entries = match tokio::fs::read_dir(&directory).await {
+        Ok(entries) => entries,
+        // A configured directory that does not exist yet is not an error; uploads create it.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err.into()),
+    };
+
+    let cutoff = std::time::SystemTime::now()
+        - Duration::from_secs(settings.uploads.temp_file_max_age_seconds.max(60));
+    let mut deleted = 0;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !TEMP_FILE_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        // An in-flight upload keeps writing, so age by last modification rather than creation.
+        let stale = metadata
+            .modified()
+            .is_ok_and(|modified| modified <= cutoff);
+        if stale && tokio::fs::remove_file(entry.path()).await.is_ok() {
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
 async fn verify_storage(state: &AppState) -> anyhow::Result<(usize, usize)> {
     let db_hashes = state
         .db
@@ -271,4 +323,71 @@ async fn verify_storage(state: &AppState) -> anyhow::Result<(usize, usize)> {
         );
     }
     Ok((missing, orphaned))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    fn settings_with_temp_dir(directory: &std::path::Path, max_age_seconds: u64) -> RuntimeSettings {
+        let mut settings = RuntimeSettings::from_config(&AppConfig::default());
+        settings.uploads.temp_dir = Some(directory.to_path_buf());
+        settings.uploads.temp_file_max_age_seconds = max_age_seconds;
+        settings
+    }
+
+    async fn age(path: &std::path::Path, seconds: u64) {
+        let when =
+            std::time::SystemTime::now() - Duration::from_secs(seconds);
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(when).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_scratch_files_are_reclaimed_and_fresh_ones_left_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in [
+            "midden-upload-abandoned.part",
+            "midden-scan-timed-out",
+            "midden-upload-in-flight.part",
+            "important-unrelated-file",
+        ] {
+            tokio::fs::write(directory.path().join(name), b"x")
+                .await
+                .unwrap();
+        }
+        age(&directory.path().join("midden-upload-abandoned.part"), 7200).await;
+        age(&directory.path().join("midden-scan-timed-out"), 7200).await;
+        age(&directory.path().join("important-unrelated-file"), 7200).await;
+
+        let deleted = cleanup_temp_files(&settings_with_temp_dir(directory.path(), 3600))
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 2);
+        assert!(!directory.path().join("midden-upload-abandoned.part").exists());
+        assert!(!directory.path().join("midden-scan-timed-out").exists());
+        assert!(
+            directory.path().join("midden-upload-in-flight.part").exists(),
+            "a recently written scratch file may still belong to a live upload"
+        );
+        assert!(
+            directory.path().join("important-unrelated-file").exists(),
+            "only Midden's own scratch files may be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_temp_directory_is_not_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let absent = directory.path().join("not-created-yet");
+
+        assert_eq!(
+            cleanup_temp_files(&settings_with_temp_dir(&absent, 3600))
+                .await
+                .unwrap(),
+            0
+        );
+    }
 }

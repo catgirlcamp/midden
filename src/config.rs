@@ -746,10 +746,24 @@ impl Default for JobsConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UploadsConfig {
     pub temp_dir: Option<PathBuf>,
+    /// How long a scratch file may sit untouched before the cleanup job removes it.
+    ///
+    /// Aborted uploads and killed processes leave partial files behind, so something has to
+    /// reclaim them. The window must comfortably exceed the slowest upload you expect to accept.
+    pub temp_file_max_age_seconds: u64,
+}
+
+impl Default for UploadsConfig {
+    fn default() -> Self {
+        Self {
+            temp_dir: None,
+            temp_file_max_age_seconds: 24 * 60 * 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -250,13 +250,15 @@ async fn read_limited_url_response(
     }
     let mut total = 0_i64;
     let (temp_path, mut temp) = create_upload_temp(settings.uploads.temp_dir.as_deref()).await?;
+    // Every early return past this point has to clean up after itself, including the `?` on a
+    // mid-stream read or write error.
+    let scratch = ScratchFile::new(temp_path);
     let mut preview = BytesMut::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         total = total.saturating_add(chunk.len() as i64);
         if total > limit {
-            let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(AppError::PayloadTooLarge);
         }
         append_preview(&mut preview, &chunk);
@@ -265,12 +267,33 @@ async fn read_limited_url_response(
     temp.flush().await?;
     drop(temp);
     Ok(UploadedFile::from_temp_path(
-        temp_path,
+        scratch.keep(),
         total,
         preview.freeze(),
         None,
         content_type,
     ))
+}
+
+/// Removes a scratch file unless ownership is handed off with [`ScratchFile::keep`].
+struct ScratchFile(Option<PathBuf>);
+
+impl ScratchFile {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn keep(mut self) -> PathBuf {
+        self.0.take().expect("scratch path is taken only once")
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 async fn validate_url_upload_target(settings: &RuntimeSettings, url: &url::Url) -> AppResult<()> {

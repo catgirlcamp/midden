@@ -148,6 +148,9 @@ page_size = 50
 
 [uploads]
 # temp_dir = "/var/lib/midden/tmp"
+# Age at which the cleanup job reclaims scratch files left by aborted uploads,
+# timed-out scans, or a hard restart. Keep this well above your slowest upload.
+temp_file_max_age_seconds = 86400
 
 [metrics]
 enabled = false
