@@ -52,6 +52,11 @@ Midden validates startup config so signed internal URLs require `internal_url_se
 ```toml
 [server]
 behind_proxy = true
+trusted_proxy_hops = 1
 ```
 
-When enabled, access checks that need the client IP can use `x-real-ip` or the first `x-forwarded-for` value. Only enable this behind a trusted proxy that strips untrusted incoming forwarding headers.
+When enabled, checks that need the client IP — rate limiting and loopback metrics access — read `x-forwarded-for` `trusted_proxy_hops` entries from the right, falling back to `x-real-ip` and then the socket peer address.
+
+Counting from the right matters: proxies append to `x-forwarded-for`, so only the right-most entries were written by infrastructure you control. Anything further left was sent by the caller and is ignored. Set `trusted_proxy_hops` to the number of proxies that append to the header before the request reaches Midden — `1` for a single nginx or Caddy, `2` for a CDN in front of it. Setting it too high makes Midden fall back to the peer address; setting it too low lets callers choose their own identity.
+
+When `behind_proxy = false`, forwarding headers are ignored entirely and the socket peer address is used.

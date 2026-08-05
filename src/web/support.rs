@@ -251,25 +251,170 @@ fn rate_limit_identity(state: &AppState, headers: &HeaderMap, user: Option<&User
     if let Some(user) = user {
         return format!("user:{}", user.id);
     }
-    if state.config.server.behind_proxy {
-        if let Some(forwarded) = headers
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return format!("ip:{forwarded}");
-        }
-        if let Some(real_ip) = headers
-            .get("x-real-ip")
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.is_empty())
-        {
-            return format!("ip:{real_ip}");
+    match client_ip(&state.config.server, headers, request_peer_ip()) {
+        Some(ip) => format!("ip:{ip}"),
+        // Only reachable when the server runs without connection info, which `serve` always
+        // supplies. Sharing one bucket is the safe direction to fail: it throttles rather than
+        // exempts.
+        None => "anonymous".to_string(),
+    }
+}
+
+/// Resolves the caller's IP address, honouring forwarding headers only in proxy deployments.
+pub(super) fn client_ip(
+    server: &crate::config::ServerConfig,
+    headers: &HeaderMap,
+    peer: Option<IpAddr>,
+) -> Option<IpAddr> {
+    if !server.behind_proxy {
+        // Without a proxy in front, forwarding headers come straight from the caller.
+        return peer;
+    }
+    forwarded_client_ip(headers, server.trusted_proxy_hops)
+        .or_else(|| header_ip(headers, "x-real-ip"))
+        .or(peer)
+}
+
+/// Reads the hop `trusted_proxy_hops` from the right of `X-Forwarded-For`.
+///
+/// Our own proxies append to the right, so those entries are trustworthy while everything to
+/// their left was supplied by the caller. Returns `None` when the header carries fewer hops than
+/// configured, which means the request did not traverse the expected proxy chain.
+fn forwarded_client_ip(headers: &HeaderMap, trusted_hops: usize) -> Option<IpAddr> {
+    let hops = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|hop| !hop.is_empty())
+        .collect::<Vec<_>>();
+    let index = hops.len().checked_sub(trusted_hops.max(1))?;
+    parse_forwarded_ip(hops.get(index)?)
+}
+
+fn header_ip(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
+    parse_forwarded_ip(headers.get(name)?.to_str().ok()?)
+}
+
+fn parse_forwarded_ip(value: &str) -> Option<IpAddr> {
+    let value = value.trim();
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    if let Ok(addr) = value.parse::<SocketAddr>() {
+        return Some(addr.ip());
+    }
+    value.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
+}
+
+fn request_peer_ip() -> Option<IpAddr> {
+    REQUEST_CONTEXT.try_with(|ctx| ctx.peer_ip).ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+
+    fn proxied(hops: usize) -> ServerConfig {
+        ServerConfig {
+            behind_proxy: true,
+            trusted_proxy_hops: hops,
+            ..ServerConfig::default()
         }
     }
-    "anonymous".to_string()
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.append(*name, HeaderValue::from_str(value).unwrap());
+        }
+        headers
+    }
+
+    fn peer() -> Option<IpAddr> {
+        Some("192.0.2.1".parse().unwrap())
+    }
+
+    #[test]
+    fn direct_deployments_ignore_forwarding_headers() {
+        let resolved = client_ip(
+            &ServerConfig::default(),
+            &headers(&[
+                ("x-forwarded-for", "203.0.113.9"),
+                ("x-real-ip", "203.0.113.9"),
+            ]),
+            peer(),
+        );
+        assert_eq!(resolved, peer());
+    }
+
+    #[test]
+    fn proxied_deployments_use_the_configured_hop_from_the_right() {
+        let chain = headers(&[("x-forwarded-for", "203.0.113.1, 198.51.100.7, 198.51.100.8")]);
+        assert_eq!(
+            client_ip(&proxied(1), &chain, peer()),
+            Some("198.51.100.8".parse().unwrap())
+        );
+        assert_eq!(
+            client_ip(&proxied(2), &chain, peer()),
+            Some("198.51.100.7".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn spoofed_leading_hops_do_not_change_the_resolved_client() {
+        let first = client_ip(
+            &proxied(1),
+            &headers(&[("x-forwarded-for", "203.0.113.1, 198.51.100.8")]),
+            peer(),
+        );
+        let second = client_ip(
+            &proxied(1),
+            &headers(&[("x-forwarded-for", "203.0.113.2, 198.51.100.8")]),
+            peer(),
+        );
+        assert_eq!(first, second);
+        assert_eq!(first, Some("198.51.100.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_short_forwarded_chain_falls_back_instead_of_trusting_the_caller() {
+        // Two proxies are configured but the caller only supplied one hop, so the header did not
+        // come through the expected chain and must not be believed.
+        assert_eq!(
+            client_ip(
+                &proxied(2),
+                &headers(&[("x-forwarded-for", "127.0.0.1")]),
+                peer()
+            ),
+            peer()
+        );
+    }
+
+    #[test]
+    fn split_forwarded_headers_and_ports_are_understood() {
+        assert_eq!(
+            client_ip(
+                &proxied(1),
+                &headers(&[
+                    ("x-forwarded-for", "203.0.113.1"),
+                    ("x-forwarded-for", "198.51.100.8:4444"),
+                ]),
+                peer()
+            ),
+            Some("198.51.100.8".parse().unwrap())
+        );
+        assert_eq!(
+            client_ip(
+                &proxied(1),
+                &headers(&[("x-forwarded-for", "[2001:db8::5]")]),
+                peer()
+            ),
+            Some("2001:db8::5".parse().unwrap())
+        );
+    }
 }
 
 pub(super) async fn api_user(

@@ -1,5 +1,9 @@
 use super::*;
 
+/// Retention for rate-limit rows, generous enough to outlive any sane configured window so the
+/// cleanup job never drops a bucket that is still counting.
+const RATE_LIMIT_BUCKET_RETENTION_SECONDS: i64 = 24 * 60 * 60;
+
 impl Database {
     pub async fn create_user(
         &self,
@@ -644,6 +648,13 @@ impl Database {
         deleted += self
             .query("DELETE FROM invite_tokens WHERE used_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?")
             .bind(now)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        // Bucket keys include the client IP, so finished windows have to be reclaimed.
+        deleted += self
+            .query("DELETE FROM rate_limit_buckets WHERE window_start <= ?")
+            .bind(now.saturating_sub(RATE_LIMIT_BUCKET_RETENTION_SECONDS))
             .execute(&self.pool)
             .await?
             .rows_affected();

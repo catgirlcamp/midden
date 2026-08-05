@@ -12,6 +12,13 @@ use tokio::{
 use tower::ServiceExt;
 
 async fn test_state(issuer_url: String) -> AppState {
+    test_state_with(issuer_url, |_| {}).await
+}
+
+async fn test_state_with(
+    issuer_url: String,
+    mutate: impl FnOnce(&mut crate::config::AppConfig),
+) -> AppState {
     let mut config = crate::config::AppConfig::default();
     config.database.url = "sqlite::memory:".to_string();
     config.database.max_connections = 1;
@@ -27,6 +34,7 @@ async fn test_state(issuer_url: String) -> AppState {
         .oidc
         .role_mappings
         .insert("admins".to_string(), "admin".to_string());
+    mutate(&mut config);
     let state = AppState::new(config).await.unwrap();
     state.db.migrate().await.unwrap();
     state
@@ -1643,6 +1651,89 @@ async fn rate_limits_ignore_spoofed_real_ip_without_proxy_mode() {
             assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         }
     }
+}
+
+async fn upload_once(client: &reqwest::Client, base: &str, headers: &[(&str, &str)]) -> StatusCode {
+    let mut request = client.post(format!("{base}/api/v1/files"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request
+        .multipart(
+            reqwest::multipart::Form::new().part(
+                "file",
+                reqwest::multipart::Part::bytes(util::secret_token().into_bytes())
+                    .file_name("file.txt")
+                    .mime_str("text/plain")
+                    .unwrap(),
+            ),
+        )
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+async fn state_with_upload_limit_behind_proxy(hops: usize) -> AppState {
+    let state = test_state_with("http://127.0.0.1".to_string(), |config| {
+        config.server.behind_proxy = true;
+        config.server.trusted_proxy_hops = hops;
+    })
+    .await;
+    let mut settings = state.settings().await.unwrap();
+    settings.security.rate_limits.insert(
+        "api_upload_file".to_string(),
+        crate::config::RateLimitConfig {
+            requests: 1,
+            window_seconds: 60,
+            enabled: true,
+        },
+    );
+    state
+        .db
+        .set_json_setting("security", &settings.security)
+        .await
+        .unwrap();
+    state
+}
+
+#[tokio::test]
+async fn rate_limits_read_the_client_ip_from_the_trusted_proxy_hop() {
+    let state = state_with_upload_limit_behind_proxy(1).await;
+    let base = spawn_http_app(state).await;
+    let client = reqwest::Client::new();
+
+    assert_eq!(
+        upload_once(&client, &base, &[("x-forwarded-for", "198.51.100.10")]).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        upload_once(&client, &base, &[("x-forwarded-for", "198.51.100.10")]).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        upload_once(&client, &base, &[("x-forwarded-for", "198.51.100.11")]).await,
+        StatusCode::OK,
+        "a different client must get its own bucket"
+    );
+}
+
+#[tokio::test]
+async fn rate_limits_ignore_forwarded_hops_the_client_prepended() {
+    let state = state_with_upload_limit_behind_proxy(1).await;
+    let base = spawn_http_app(state).await;
+    let client = reqwest::Client::new();
+
+    // The right-most hop is what our own proxy appended; everything left of it is caller-supplied.
+    assert_eq!(
+        upload_once(&client, &base, &[("x-forwarded-for", "203.0.113.1, 198.51.100.10")]).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        upload_once(&client, &base, &[("x-forwarded-for", "203.0.113.2, 198.51.100.10")]).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "rotating a spoofed leading hop must not mint a fresh rate-limit bucket"
+    );
 }
 
 #[tokio::test]

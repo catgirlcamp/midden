@@ -73,7 +73,8 @@ pub(super) async fn metrics(
             }
         }
         crate::config::MetricsAccessMode::Loopback => {
-            let ip = client_ip_for_access_check(&state, &headers, peer.as_ref());
+            let peer_ip = peer.map(|ConnectInfo(addr)| addr.ip());
+            let ip = client_ip(&state.config.server, &headers, peer_ip);
             if !ip.is_some_and(|ip| ip.is_loopback()) {
                 return Err(AppError::Forbidden);
             }
@@ -90,26 +91,6 @@ pub(super) async fn metrics(
         body,
     )
         .into_response())
-}
-
-fn client_ip_for_access_check(
-    state: &AppState,
-    headers: &HeaderMap,
-    peer: Option<&ConnectInfo<SocketAddr>>,
-) -> Option<IpAddr> {
-    if state.config.server.behind_proxy
-        && let Some(ip) = headers
-            .get("x-real-ip")
-            .or_else(|| headers.get("x-forwarded-for"))
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .and_then(|value| value.parse::<IpAddr>().ok())
-    {
-        return Some(ip);
-    }
-    peer.map(|ConnectInfo(addr)| addr.ip())
 }
 
 pub(super) async fn static_asset(

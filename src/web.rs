@@ -80,6 +80,8 @@ pub struct RequestContext {
     pub current_user: Option<crate::db::User>,
     pub csrf_token: Option<String>,
     pub is_htmx: bool,
+    /// Address of the socket the request arrived on, before any forwarding headers are consulted.
+    pub peer_ip: Option<IpAddr>,
 }
 
 tokio::task_local! {
@@ -148,6 +150,10 @@ async fn request_context_middleware(
     }
     let is_htmx = htmx_request(&headers);
     let secure_cookies = settings.security.secure_cookies;
+    let peer_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
 
     let ctx = RequestContext {
         templates: state.templates.clone(),
@@ -155,6 +161,7 @@ async fn request_context_middleware(
         current_user,
         csrf_token: csrf_token.clone(),
         is_htmx,
+        peer_ip,
     };
 
     let mut response = REQUEST_CONTEXT

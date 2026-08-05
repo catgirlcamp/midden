@@ -9,6 +9,9 @@ pub(super) fn validate(config: &AppConfig) -> anyhow::Result<()> {
         .parse::<SocketAddr>()
         .map_err(|err| anyhow::anyhow!("server.bind must be a socket address: {err}"))?;
     validate_base_url("server.public_base_url", &config.server.public_base_url)?;
+    if config.server.behind_proxy && config.server.trusted_proxy_hops == 0 {
+        anyhow::bail!("server.trusted_proxy_hops must be at least 1 when behind_proxy is enabled");
+    }
 
     let database_url = config.database.url.trim().to_ascii_lowercase();
     if !database_url.starts_with("sqlite:")

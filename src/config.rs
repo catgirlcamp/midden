@@ -127,6 +127,12 @@ pub struct ServerConfig {
     pub template_dir: Option<PathBuf>,
     pub static_dir: Option<PathBuf>,
     pub behind_proxy: bool,
+    /// Number of reverse proxies that append to `X-Forwarded-For` in front of Midden.
+    ///
+    /// Client IPs are read this many hops from the right of the header, because only the
+    /// right-most entries were written by infrastructure we control. Everything to their left is
+    /// supplied by the caller and must never be trusted. Ignored unless `behind_proxy` is set.
+    pub trusted_proxy_hops: usize,
 }
 
 impl Default for ServerConfig {
@@ -137,6 +143,7 @@ impl Default for ServerConfig {
             template_dir: None,
             static_dir: None,
             behind_proxy: false,
+            trusted_proxy_hops: 1,
         }
     }
 }

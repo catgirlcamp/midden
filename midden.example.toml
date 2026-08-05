@@ -4,6 +4,10 @@ public_base_url = "http://127.0.0.1:8080"
 # template_dir = "/etc/midden/templates"
 # static_dir = "/etc/midden/static"
 behind_proxy = false
+# Number of reverse proxies in front of Midden that append to X-Forwarded-For.
+# Client IPs are read this many hops from the right; entries further left are
+# caller-supplied and ignored. Only meaningful when behind_proxy = true.
+trusted_proxy_hops = 1
 
 [database]
 url = "sqlite://midden.db?mode=rwc"
