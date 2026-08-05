@@ -480,36 +480,37 @@ pub(super) async fn register(
     let password_hash = util::hash_password(&form.password)?;
     let requires_email_verification =
         matches!(settings.policy.signup, crate::config::SignupMode::Open) && state.mailer.enabled();
-    let created = state
-        .db
-        .create_user(
-            &form.email,
-            &form.username,
-            Some(&password_hash),
-            Role::User,
-        )
-        .await?;
-    if matches!(
+    let created = if matches!(
         settings.policy.signup,
         crate::config::SignupMode::InviteOnly
     ) {
         let token = form
             .invite_token
             .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
             .ok_or_else(|| AppError::BadRequest("invite token is required".to_string()))?;
-        let role = match state
+        state
             .db
-            .consume_invite_token(&util::hash_token(token), &created.id)
-            .await
-        {
-            Ok(role) => role,
-            Err(_) => {
-                state.db.delete_user(&created.id).await?;
-                return Err(AppError::BadRequest("invalid invite token".to_string()));
-            }
-        };
-        state.db.set_user_role(&created.id, role).await?;
-    }
+            .create_user_with_invite(
+                &form.email,
+                &form.username,
+                Some(&password_hash),
+                &util::hash_token(token),
+            )
+            .await?
+            .ok_or_else(|| AppError::BadRequest("invalid invite token".to_string()))?
+    } else {
+        state
+            .db
+            .create_user(
+                &form.email,
+                &form.username,
+                Some(&password_hash),
+                Role::User,
+            )
+            .await?
+    };
     state
         .db
         .audit(Some(&created.id), "user.created", &created.id, "signup")

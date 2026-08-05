@@ -126,14 +126,6 @@ impl Database {
         Ok(())
     }
 
-    pub async fn delete_user(&self, user_id: &str) -> anyhow::Result<()> {
-        self.query("DELETE FROM users WHERE id = ?")
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
     pub async fn enabled_owner_count(&self) -> anyhow::Result<i64> {
         let row = self
             .query("SELECT COUNT(*) AS count FROM users WHERE role = 'owner' AND is_disabled = 0")
@@ -191,33 +183,88 @@ impl Database {
         Ok(())
     }
 
-    pub async fn consume_invite_token(
+    /// Creates a user and claims an invite token in one transaction.
+    ///
+    /// Returns `Ok(None)` when the invite is unknown, already used, revoked, or expired. Creating
+    /// the account and consuming the invite must stay atomic: a two-step version leaves a usable
+    /// account behind whenever the second step is skipped or fails.
+    pub async fn create_user_with_invite(
         &self,
+        email: &str,
+        username: &str,
+        password_hash: Option<&str>,
         token_hash: &str,
-        user_id: &str,
-    ) -> anyhow::Result<Role> {
-        let row = self
-            .query(
-                "SELECT id, role, expires_at
+    ) -> anyhow::Result<Option<User>> {
+        let select = if self.kind == DatabaseKind::Postgres {
+            "SELECT id, role, expires_at
              FROM invite_tokens
-             WHERE token_hash = ? AND used_at IS NULL AND revoked_at IS NULL",
-            )
+             WHERE token_hash = ? AND used_at IS NULL AND revoked_at IS NULL
+             FOR UPDATE"
+        } else {
+            "SELECT id, role, expires_at
+             FROM invite_tokens
+             WHERE token_hash = ? AND used_at IS NULL AND revoked_at IS NULL"
+        };
+        let mut transaction = self.pool.begin().await?;
+        let row = self
+            .query(select)
             .bind(token_hash)
-            .fetch_one(&self.pool)
+            .fetch_optional(&mut *transaction)
             .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let now = util::now_ts();
         let expires_at: Option<i64> = row.try_get("expires_at")?;
-        if expires_at.is_some_and(|expires_at| expires_at <= util::now_ts()) {
-            anyhow::bail!("invite token expired");
+        if expires_at.is_some_and(|expires_at| expires_at <= now) {
+            transaction.rollback().await?;
+            return Ok(None);
         }
         let invite_id: String = row.try_get("id")?;
         let role = Role::from_str(&row.try_get::<String, _>("role")?);
-        self.query("UPDATE invite_tokens SET used_by_user_id = ?, used_at = ? WHERE id = ?")
-            .bind(user_id)
-            .bind(util::now_ts())
+
+        let id = uuid::Uuid::new_v4().to_string();
+        self.query(
+            "INSERT INTO users (id, email, username, password_hash, role, is_disabled, email_verified_at, two_factor_enabled, created_at)
+             VALUES (?, ?, ?, ?, ?, 0, ?, 0, ?)",
+        )
+        .bind(&id)
+        .bind(email)
+        .bind(username)
+        .bind(password_hash)
+        .bind(role.as_str())
+        .bind(now)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+
+        let claimed = self
+            .query(
+                "UPDATE invite_tokens SET used_by_user_id = ?, used_at = ?
+                 WHERE id = ? AND used_at IS NULL",
+            )
+            .bind(&id)
+            .bind(now)
             .bind(invite_id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
-        Ok(role)
+        if claimed.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+
+        let row = self
+            .query(
+                "SELECT id, email, username, password_hash, role, is_disabled, email_verified_at, two_factor_enabled, created_at
+                 FROM users WHERE id = ?",
+            )
+            .bind(&id)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let user = User::from_row(&row)?;
+        transaction.commit().await?;
+        Ok(Some(user))
     }
 
     pub async fn list_invite_tokens(&self) -> anyhow::Result<Vec<InviteTokenSummary>> {

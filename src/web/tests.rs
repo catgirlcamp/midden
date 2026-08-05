@@ -1852,6 +1852,91 @@ async fn invite_only_registration_with_invalid_token_does_not_create_user() {
 }
 
 #[tokio::test]
+async fn invite_only_registration_without_a_token_does_not_create_user() {
+    let state = test_state("http://127.0.0.1".to_string()).await;
+    let mut policy = state.settings().await.unwrap().policy;
+    policy.signup = crate::config::SignupMode::InviteOnly;
+    state.db.set_json_setting("policy", &policy).await.unwrap();
+    let csrf = util::secret_token();
+
+    let response = state
+        .clone()
+        .router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/register")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("midden_csrf={csrf}"))
+                .body(Body::from(format!(
+                    "email=no-invite%40example.test&username=no-invite&password=correct%20horse&csrf_token={csrf}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        state.db.user_by_email("no-invite@example.test").await.is_err(),
+        "omitting invite_token must not smuggle an account past invite-only signup"
+    );
+}
+
+#[tokio::test]
+async fn invite_only_registration_consumes_the_invite_and_applies_its_role() {
+    let state = test_state("http://127.0.0.1".to_string()).await;
+    let mut policy = state.settings().await.unwrap().policy;
+    policy.signup = crate::config::SignupMode::InviteOnly;
+    state.db.set_json_setting("policy", &policy).await.unwrap();
+    let invite = util::secret_token();
+    state
+        .db
+        .create_invite_token(&util::hash_token(&invite), "admin-user", Role::Moderator, None)
+        .await
+        .unwrap();
+    let csrf = util::secret_token();
+
+    let register = |body: String| {
+        let state = state.clone();
+        let csrf = csrf.clone();
+        async move {
+            state
+                .router()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/register")
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .header(header::COOKIE, format!("midden_csrf={csrf}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+
+    let accepted = register(format!(
+        "email=invited%40example.test&username=invited&password=correct%20horse&invite_token={invite}&csrf_token={csrf}"
+    ))
+    .await;
+    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    let user = state.db.user_by_email("invited@example.test").await.unwrap();
+    assert_eq!(user.role, Role::Moderator);
+
+    let replayed = register(format!(
+        "email=replay%40example.test&username=replay&password=correct%20horse&invite_token={invite}&csrf_token={csrf}"
+    ))
+    .await;
+    assert_eq!(replayed.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        state.db.user_by_email("replay@example.test").await.is_err(),
+        "a consumed invite must not admit a second account"
+    );
+}
+
+#[tokio::test]
 async fn scoped_api_token_cannot_mint_broader_token() {
     let state = test_state("http://127.0.0.1".to_string()).await;
     let base = spawn_http_app(state.clone()).await;
