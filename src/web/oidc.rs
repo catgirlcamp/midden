@@ -163,7 +163,7 @@ async fn resolve_login_user(
     subject: &str,
     email: &str,
     userinfo: &UserInfo,
-    mapped_role: Role,
+    mapped_role: Option<Role>,
 ) -> AppResult<User> {
     if let Some(user) = state.db.user_by_oidc_identity(issuer, subject).await? {
         state.db.touch_oidc_identity(issuer, subject, email).await?;
@@ -178,6 +178,14 @@ async fn resolve_login_user(
                     .to_string(),
             ));
         }
+        // Adopting an account we did not provision is only safe if the provider vouches for the
+        // address. Without this, anyone who can assert an arbitrary email at the issuer takes over
+        // matching passwordless accounts, including an owner created without a password.
+        if userinfo.email_verified != Some(true) {
+            return Err(AppError::BadRequest(
+                "the identity provider did not report this email address as verified".to_string(),
+            ));
+        }
         state
             .db
             .link_oidc_identity(&existing.id, issuer, subject, email)
@@ -190,8 +198,10 @@ async fn resolve_login_user(
             .map_err(AppError::Other);
     }
 
+    // Provisioning a brand-new account is bound to issuer+subject and puts no existing account at
+    // risk, so an absent email_verified claim is tolerated here.
     let username = username(userinfo, email);
-    let user = create_user(state, email, &username, mapped_role).await?;
+    let user = create_user(state, email, &username, mapped_role.unwrap_or(Role::User)).await?;
     state
         .db
         .link_oidc_identity(&user.id, issuer, subject, email)
@@ -235,7 +245,13 @@ async fn create_user(state: &AppState, email: &str, username: &str, role: Role) 
         .await?)
 }
 
-async fn apply_role(state: &AppState, user: &User, mapped_role: Role) -> AppResult<()> {
+async fn apply_role(state: &AppState, user: &User, mapped_role: Option<Role>) -> AppResult<()> {
+    // No claim matched a configured mapping, so the provider is not asserting anything about this
+    // user's role. Leave whatever the instance has on record rather than resetting it: treating
+    // "no opinion" as "demote to user" silently strips admins and moderators on every login.
+    let Some(mapped_role) = mapped_role else {
+        return Ok(());
+    };
     if user.role != mapped_role && (user.role != Role::Owner || mapped_role == Role::Owner) {
         state.db.set_user_role(&user.id, mapped_role).await?;
         state
@@ -313,8 +329,9 @@ fn validate_userinfo(oidc: &OidcConfig, userinfo: &UserInfo, email: &str) -> App
     Ok(())
 }
 
-fn mapped_role(oidc: &OidcConfig, userinfo: &UserInfo) -> AppResult<Role> {
-    let mut role = Role::User;
+/// Resolves the highest role the provider's claims map to, or `None` when no claim matched.
+fn mapped_role(oidc: &OidcConfig, userinfo: &UserInfo) -> AppResult<Option<Role>> {
+    let mut role: Option<Role> = None;
     for value in claim_values(userinfo, oidc.role_claim.as_deref().unwrap_or("role"))
         .into_iter()
         .chain(claim_values(
@@ -325,7 +342,7 @@ fn mapped_role(oidc: &OidcConfig, userinfo: &UserInfo) -> AppResult<Role> {
         if let Some(mapped) = oidc.role_mappings.get(&value) {
             let mapped_role = Role::parse_form(mapped)
                 .map_err(|err| AppError::BadRequest(format!("invalid OIDC role mapping: {err}")))?;
-            role = role.max(mapped_role);
+            role = Some(role.map_or(mapped_role, |current| current.max(mapped_role)));
         }
     }
     Ok(role)
@@ -381,10 +398,24 @@ struct TokenResponse {
 struct UserInfo {
     sub: Option<String>,
     email: Option<String>,
+    #[serde(default, deserialize_with = "bool_claim")]
+    email_verified: Option<bool>,
     preferred_username: Option<String>,
     name: Option<String>,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Reads a boolean claim, tolerating providers that encode it as a string.
+fn bool_claim<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<serde_json::Value>::deserialize(deserializer)? {
+        Some(serde_json::Value::Bool(value)) => Some(value),
+        Some(serde_json::Value::String(value)) => value.parse().ok(),
+        _ => None,
+    })
 }
 
 async fn discovery(state: &AppState) -> AppResult<Discovery> {

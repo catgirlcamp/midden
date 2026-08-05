@@ -3505,6 +3505,167 @@ async fn oidc_callback_requires_explicit_link_for_existing_local_user() {
     );
 }
 
+async fn oidc_callback(state: &AppState, cookie_state: &str) -> Response {
+    state
+        .clone()
+        .router()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/auth/oidc/callback?code=abc&state={cookie_state}"))
+                .header(
+                    header::COOKIE,
+                    format!("midden_oidc_state={cookie_state}; midden_oidc_purpose=login"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn oidc_login_keeps_roles_that_have_no_claim_mapping() {
+    let issuer = spawn_oidc_provider(serde_json::json!({
+        "sub": "subject-keep-role",
+        "email": "moderator@example.test",
+        "preferred_username": "moderator",
+        // Carries no group that appears in role_mappings.
+        "groups": ["staff"]
+    }))
+    .await;
+    let state = test_state_with(issuer.clone(), |config| {
+        config.oidc.allowed_groups.push("staff".to_string());
+    })
+    .await;
+    let user = state
+        .db
+        .create_user("moderator@example.test", "moderator", None, Role::Moderator)
+        .await
+        .unwrap();
+    state
+        .db
+        .link_oidc_identity(&user.id, &issuer, "subject-keep-role", "moderator@example.test")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        oidc_callback(&state, "state-keep-role").await.status(),
+        StatusCode::SEE_OTHER
+    );
+
+    let user = state
+        .db
+        .user_by_email("moderator@example.test")
+        .await
+        .unwrap();
+    assert_eq!(
+        user.role,
+        Role::Moderator,
+        "an unmapped OIDC login must not silently demote a privileged account"
+    );
+}
+
+#[tokio::test]
+async fn oidc_login_still_applies_a_matching_role_mapping() {
+    let issuer = spawn_oidc_provider(serde_json::json!({
+        "sub": "subject-apply-role",
+        "email": "promoted@example.test",
+        "preferred_username": "promoted",
+        "groups": ["admins"]
+    }))
+    .await;
+    let state = test_state(issuer.clone()).await;
+    let user = state
+        .db
+        .create_user("promoted@example.test", "promoted", None, Role::User)
+        .await
+        .unwrap();
+    state
+        .db
+        .link_oidc_identity(&user.id, &issuer, "subject-apply-role", "promoted@example.test")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        oidc_callback(&state, "state-apply-role").await.status(),
+        StatusCode::SEE_OTHER
+    );
+
+    assert_eq!(
+        state
+            .db
+            .user_by_email("promoted@example.test")
+            .await
+            .unwrap()
+            .role,
+        Role::Admin
+    );
+}
+
+#[tokio::test]
+async fn oidc_login_refuses_to_adopt_an_account_on_an_unverified_email() {
+    let issuer = spawn_oidc_provider(serde_json::json!({
+        "sub": "subject-unverified",
+        "email": "owner@example.test",
+        "email_verified": false,
+        "preferred_username": "owner",
+        "groups": ["admins"]
+    }))
+    .await;
+    let state = test_state(issuer.clone()).await;
+    // A passwordless owner, as `midden owner create` leaves one when no password is given.
+    state
+        .db
+        .upsert_owner("owner@example.test", "owner", None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        oidc_callback(&state, "state-unverified").await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert!(
+        state
+            .db
+            .user_by_oidc_identity(&issuer, "subject-unverified")
+            .await
+            .unwrap()
+            .is_none(),
+        "an unverified provider email must not take over an existing account"
+    );
+}
+
+#[tokio::test]
+async fn oidc_login_adopts_a_passwordless_account_on_a_verified_email() {
+    let issuer = spawn_oidc_provider(serde_json::json!({
+        "sub": "subject-verified",
+        "email": "verified@example.test",
+        "email_verified": true,
+        "preferred_username": "verified",
+        "groups": ["admins"]
+    }))
+    .await;
+    let state = test_state(issuer.clone()).await;
+    state
+        .db
+        .create_user("verified@example.test", "verified", None, Role::User)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        oidc_callback(&state, "state-verified").await.status(),
+        StatusCode::SEE_OTHER
+    );
+    assert!(
+        state
+            .db
+            .user_by_oidc_identity(&issuer, "subject-verified")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[tokio::test]
 async fn base_template_renders_custom_expiry_presets() {
     let issuer = spawn_oidc_provider(serde_json::json!({

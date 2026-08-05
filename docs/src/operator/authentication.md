@@ -59,6 +59,18 @@ midden-admins = "admin"
 
 OIDC is considered usable only when accounts, the OIDC feature flag, provider config, client credentials, and redirect URL are present. The admin save path rejects settings that would disable local login without a usable OIDC login path.
 
+### Role Mapping
+
+On each login Midden collects the values of `role_claim` and `groups_claim` and takes the highest role any of them maps to in `[oidc.role_mappings]`. That role is written back to the account, except that an owner is never demoted.
+
+If no claim value matches a mapping, the stored role is left alone. The provider has not said anything about this user, so a role assigned with `user set-role` survives their next OIDC login. To manage roles entirely from the provider, map every group that should get elevated access and remove elevated roles there rather than in Midden.
+
+### Email Trust
+
+When an OIDC identity signs in for the first time and an account already exists with the same email address, Midden will adopt that account only if it has no local password **and** the provider reports `email_verified` as true. Providers that let users assert arbitrary addresses would otherwise hand over any matching passwordless account — including an owner created without `--password`.
+
+Accounts newly provisioned by OIDC do not require the claim, since they are bound to the issuer and subject and put no existing account at risk.
+
 ## Two-Factor Challenges
 
 Users can enable two-factor authentication from the account page. Midden sends a challenge code by email, so SMTP must be configured for the challenge flow to be usable.
