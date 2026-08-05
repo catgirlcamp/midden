@@ -243,7 +243,7 @@ fn nonempty_option(value: &Option<String>) -> Option<&str> {
 
 /// Checks that a value is safe to interpolate into a CSS declaration.
 ///
-/// The accent colour lands inside a `<style>` block, where HTML escaping does nothing useful: the
+/// The accent color lands inside a `<style>` block, where HTML escaping does nothing useful: the
 /// CSS parser never decodes entities. Without this, anyone who can reach the admin settings form
 /// could close the declaration and append rules that run for every visitor.
 fn validate_css_color(label: &str, value: &str) -> anyhow::Result<()> {

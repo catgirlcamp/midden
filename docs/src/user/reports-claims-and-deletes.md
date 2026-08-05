@@ -9,7 +9,7 @@ When reports are enabled, users can report files and pastes from item pages:
 /report/paste/{id}
 ```
 
-Reports include a reason and optional details. Operators can notify a moderation webhook and an abuse email address.
+Reports include a reason and optional details. The item has to exist — a report for an unknown ID is rejected. Operators can notify a moderation webhook and an abuse email address.
 
 ## Deletes
 

@@ -53,7 +53,9 @@ access = "token"
 bearer_token = "change-me"
 ```
 
-Loopback mode can respect reverse proxy headers only when `server.behind_proxy = true`.
+Loopback mode consults forwarding headers only when `server.behind_proxy = true`, and then reads the client IP from the hop `server.trusted_proxy_hops` in from the right of `X-Forwarded-For`. See [Delivery And CDN](./delivery-and-cdn.md#reverse-proxies) for how that hop is chosen.
+
+With `behind_proxy = false` the headers are ignored entirely and the socket peer address decides. Do not enable `behind_proxy` unless a proxy really is in front of Midden: it tells Midden to believe headers that a direct caller would otherwise be free to invent.
 
 ## Metric Names
 

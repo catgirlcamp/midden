@@ -16,9 +16,23 @@ enabled = true
 blocked_hashes = []
 blocked_mime_types = []
 default_on_error = "allow"
+timeout_seconds = 30
 ```
 
 `default_on_error` controls what happens when an adapter fails. For high-trust public upload systems, consider `quarantine` instead of `allow`.
+
+## Timeouts
+
+Adapters run inline with the upload request, so a scanner that stops responding would hold that request — and its temporary file — open indefinitely. `timeout_seconds` bounds each adapter individually and counts expiry as `default_on_error`.
+
+```toml
+[scanning]
+timeout_seconds = 30
+```
+
+The budget applies to the whole adapter call: process execution for the command adapter, the HTTP round trip for webhooks, and connect plus scan for ClamAV. A command adapter that exceeds it is killed rather than left running.
+
+Set this above the time your slowest scanner needs for your largest accepted upload. If it is too low, healthy scans start resolving as `default_on_error`, which is silent when that value is `allow` — check the scan results on the admin item page if decisions look wrong.
 
 ## Block Lists
 

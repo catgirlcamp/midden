@@ -26,6 +26,10 @@ create_account = "disabled"
 - `invite_only`: users need invite tokens created by admins.
 - `admin_created`: admins create users manually.
 
+Under `invite_only`, the account and the invite are created together in one transaction: a registration that does not present a valid, unused, unexpired invite creates nothing. Invites carry the role the new account gets, and each one admits exactly one account.
+
+Under `open`, registration requires email verification whenever SMTP is enabled.
+
 ## Local Login
 
 Local login uses password hashes stored on users. Owner password recovery is available from the CLI:
@@ -74,6 +78,14 @@ Accounts newly provisioned by OIDC do not require the claim, since they are boun
 ## Two-Factor Challenges
 
 Users can enable two-factor authentication from the account page. Midden sends a challenge code by email, so SMTP must be configured for the challenge flow to be usable.
+
+## Password Reset
+
+Reset links are requested at `/auth/password-reset` and expire after one hour.
+
+The request endpoint answers identically whether or not the address has an account, and sends mail in the background so that response time does not reveal the answer either. Nothing about a failed delivery reaches the caller, so watch the logs if users report links not arriving.
+
+Completing a reset is treated as account recovery. It drops every session for the account and revokes all of its API tokens, on the assumption that whoever prompted the reset may still hold them. A password change from the account page is narrower: it signs out the account's other sessions and leaves tokens alone.
 
 ## Roles
 

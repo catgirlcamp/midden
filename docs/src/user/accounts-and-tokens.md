@@ -34,6 +34,12 @@ default_ttl_seconds = 2592000
 max_ttl_seconds = 31536000
 ```
 
+Completing a password reset revokes every token on the account, so anything automated against Midden needs a fresh token afterwards. Changing your password from the account page leaves tokens working.
+
+## Sessions
+
+Changing your password signs out your other sessions and keeps the one you are using. A password reset signs out every session, including the one that performed it — you are signed back in immediately as part of the reset.
+
 ## Two-Factor Authentication
 
 Two-factor setup uses emailed challenge codes. SMTP must be configured and working.

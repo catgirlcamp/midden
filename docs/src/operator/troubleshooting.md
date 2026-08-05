@@ -59,7 +59,7 @@ Check:
 - 404: `metrics.enabled` is false.
 - 403 in `admin` mode: request is not from an admin session.
 - 403 in `token` mode: missing or mismatched bearer token.
-- 403 in `loopback` mode: request IP is not loopback or proxy headers are not trusted.
+- 403 in `loopback` mode: the resolved client IP is not loopback. With `behind_proxy = true`, check that `server.trusted_proxy_hops` matches how many proxies actually append to `X-Forwarded-For`; if the header is shorter than that, Midden falls back to the socket peer address.
 
 ## Public Browse Is Empty
 

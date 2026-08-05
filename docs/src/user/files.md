@@ -28,6 +28,14 @@ Keep delete tokens private. They can delete or claim anonymous items depending o
 - `private`: visible only to the owning account and moderators.
 - `public`: visible in `/browse` when public browse is enabled.
 
+## Browsing
+
+`/browse` lists public files and public pastes newest first, `discovery.page_size` of each per page, capped at 100 per listing.
+
+The two listings page independently, so "Older items" carries a cursor for each: `before_file` and `before_paste`. Follow the link rather than constructing these by hand. A cursor is `<created_at>.<public_id>`; the ID is part of it so that items uploaded within the same second still page correctly.
+
+These replaced a single `before` parameter. A stale link using it is ignored and lands on the first page.
+
 ## Preview Pages
 
 When `features.preview_pages = true`, file links open a preview page first. Otherwise, file links serve the raw file directly.

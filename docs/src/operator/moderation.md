@@ -35,7 +35,9 @@ Non-active items render the configured takedown page text instead of serving nor
 
 Users and anonymous visitors can submit reports when reports are enabled. Reports capture item kind, public ID, reason, details, optional reporter user, and state.
 
-Admin and moderator surfaces support filtering by report state, kind, reason, and age.
+A report must name an item that exists; reports for unknown IDs are rejected with 404 so the queue stays actionable. Items in any state can be reported, including ones already taken down, since a reporter may be acting on something they saw earlier.
+
+Admin and moderator surfaces support filtering by report state, kind, reason, and age. Filters are applied by the query, so an old open report stays visible no matter how many newer resolved reports sit above it.
 
 ## Moderation Webhook
 

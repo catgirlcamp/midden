@@ -31,6 +31,20 @@ Response:
 }
 ```
 
+`id` must identify an existing file or paste. Unknown IDs return 404:
+
+```json
+{
+  "error": {
+    "status": 404,
+    "code": "not_found",
+    "message": "Not Found"
+  }
+}
+```
+
+Items in any moderation state can be reported, including ones already taken down.
+
 ## List Reports
 
 ```console
@@ -44,6 +58,8 @@ Required scope and role:
 admin:reports
 moderator or higher
 ```
+
+Supported filters are `state`, `kind`, `reason` (case-insensitive substring), and `days`. Filtering happens in the query, so an open report stays reachable however many newer resolved reports exist. Results are capped at 100, newest first.
 
 ## Update A Report
 

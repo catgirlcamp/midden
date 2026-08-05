@@ -11,6 +11,9 @@ interval_seconds = 300
 metadata_limit = 25
 scanner_retry_limit = 10
 storage_verify_interval_seconds = 3600
+
+[uploads]
+temp_file_max_age_seconds = 86400
 ```
 
 The runtime enforces a minimum sleep interval of 30 seconds.
