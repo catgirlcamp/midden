@@ -199,11 +199,16 @@ async fn process_file_metadata(
                 Some(bytes) => bytes,
                 None => state.storage.get_blob(&file.blob_hash).await?,
             };
-            if let Some(thumbnail) = processing::thumbnail_derivative(
-                content_type,
-                &bytes,
-                settings.processing.thumbnail_max_dimension,
-            ) {
+            // Decoding is CPU-bound and sized by the image's declared dimensions, not the file, so
+            // it must not run on a runtime worker.
+            let limits = processing::ThumbnailLimits::from_config(&settings.processing);
+            let content_type = content_type.to_string();
+            let source = bytes.clone();
+            let derived = tokio::task::spawn_blocking(move || {
+                processing::thumbnail_derivative(&content_type, &source, limits)
+            })
+            .await?;
+            if let Some(thumbnail) = derived {
                 let hash = util::sha256_hex_bytes(&thumbnail);
                 let mut blob_mutation = state.db.begin_blob_mutation(&hash).await?;
                 blob_mutation

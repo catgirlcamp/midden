@@ -136,6 +136,11 @@ metadata_stripping = false
 thumbnails = false
 thumbnail_max_dimension = 320
 thumbnail_jpeg_quality = 82
+# Guardrails for decoding uploaded images. A small file can declare enormous
+# dimensions, so cap both the accepted size per side and how much the decoder
+# may allocate. Sources beyond these bounds get no thumbnail.
+thumbnail_source_max_pixels = 16384
+thumbnail_source_max_alloc_bytes = 268435456
 
 [discovery]
 robots_index = false
@@ -228,6 +233,10 @@ enabled = false
 blocked_hashes = []
 blocked_mime_types = []
 default_on_error = "allow"
+# Per-adapter wall-clock budget. Adapters run inline with the upload, so a
+# scanner that stops responding would otherwise hold the request open forever.
+# Exceeding this is treated as default_on_error.
+timeout_seconds = 30
 
 # Scanner decisions:
 # - allow: publish normally

@@ -661,6 +661,9 @@ pub struct ScanningConfig {
     pub blocked_hashes: Vec<String>,
     pub blocked_mime_types: Vec<String>,
     pub default_on_error: ScanDecision,
+    /// Wall-clock budget for a single adapter. Exceeding it counts as `default_on_error`, so a
+    /// wedged scanner cannot hold an upload request open indefinitely.
+    pub timeout_seconds: u64,
 }
 
 impl Default for ScanningConfig {
@@ -671,6 +674,7 @@ impl Default for ScanningConfig {
             blocked_hashes: Vec::new(),
             blocked_mime_types: Vec::new(),
             default_on_error: ScanDecision::Allow,
+            timeout_seconds: 30,
         }
     }
 }
@@ -683,6 +687,11 @@ pub struct ProcessingConfig {
     pub thumbnails: bool,
     pub thumbnail_max_dimension: u32,
     pub thumbnail_jpeg_quality: u8,
+    /// Largest source image, per side, that will be decoded for a thumbnail.
+    pub thumbnail_source_max_pixels: u32,
+    /// Decode allocation ceiling in bytes. A small file can declare enormous dimensions, so
+    /// without a cap the decoder will happily try to allocate the whole uncompressed bitmap.
+    pub thumbnail_source_max_alloc_bytes: u64,
 }
 
 impl Default for ProcessingConfig {
@@ -693,6 +702,8 @@ impl Default for ProcessingConfig {
             thumbnails: false,
             thumbnail_max_dimension: 320,
             thumbnail_jpeg_quality: 82,
+            thumbnail_source_max_pixels: 16_384,
+            thumbnail_source_max_alloc_bytes: 256 * 1024 * 1024,
         }
     }
 }

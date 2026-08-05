@@ -113,7 +113,13 @@ pub(super) async fn show_paste(
         paste.owner_user_id.as_deref(),
         &paste.visibility,
     )?;
-    let rendered = render_paste_content(&paste.content, paste.syntax.as_deref());
+    let rendered = {
+        let content = paste.content.clone();
+        let syntax = paste.syntax.clone();
+        tokio::task::spawn_blocking(move || render_paste_content(&content, syntax.as_deref()))
+            .await
+            .map_err(|err| AppError::Other(anyhow::anyhow!("paste rendering failed: {err}")))?
+    };
     let can_edit = can_edit_paste(&settings, user.as_ref(), &paste);
     let revision_count = state.db.paste_revision_count(&paste.id).await.unwrap_or(0);
     let base = state.config.server.public_base_url.trim_end_matches('/');
@@ -239,28 +245,44 @@ fn can_edit_paste(settings: &RuntimeSettings, user: Option<&User>, paste: &Paste
     user.role >= Role::Admin || paste.owner_user_id.as_deref() == Some(user.id.as_str())
 }
 
+/// Syntect's bundled definitions deserialize several megabytes each. Building them per request
+/// made every view of a highlighted paste an unauthenticated CPU sink.
+static HIGHLIGHTING: std::sync::LazyLock<Highlighting> = std::sync::LazyLock::new(|| Highlighting {
+    syntaxes: syntect::parsing::SyntaxSet::load_defaults_newlines(),
+    themes: syntect::highlighting::ThemeSet::load_defaults(),
+});
+
+struct Highlighting {
+    syntaxes: syntect::parsing::SyntaxSet,
+    themes: syntect::highlighting::ThemeSet,
+}
+
+fn plain_paste_body(content: &str) -> String {
+    format!(
+        "<pre class=\"paste-body\"><code>{}</code></pre>",
+        html_escape::encode_text(content)
+    )
+}
+
+/// Highlights paste content. Blocking and CPU-bound for large pastes; call from `spawn_blocking`.
 fn render_paste_content(content: &str, syntax: Option<&str>) -> String {
     let Some(syntax) = syntax.filter(|value| !value.trim().is_empty()) else {
-        return format!(
-            "<pre class=\"paste-body\"><code>{}</code></pre>",
-            html_escape::encode_text(content)
-        );
+        return plain_paste_body(content);
     };
-    let syntax_set = syntect::parsing::SyntaxSet::load_defaults_newlines();
-    let theme_set = syntect::highlighting::ThemeSet::load_defaults();
-    let syntax_ref = syntax_set
+    let Some(theme) = HIGHLIGHTING.themes.themes.get("base16-ocean.dark") else {
+        return plain_paste_body(content);
+    };
+    let syntax_ref = HIGHLIGHTING
+        .syntaxes
         .find_syntax_by_token(syntax)
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+        .unwrap_or_else(|| HIGHLIGHTING.syntaxes.find_syntax_plain_text());
     match syntect::html::highlighted_html_for_string(
         content,
-        &syntax_set,
+        &HIGHLIGHTING.syntaxes,
         syntax_ref,
-        &theme_set.themes["base16-ocean.dark"],
+        theme,
     ) {
         Ok(html) => html,
-        Err(_) => format!(
-            "<pre class=\"paste-body\"><code>{}</code></pre>",
-            html_escape::encode_text(content)
-        ),
+        Err(_) => plain_paste_body(content),
     }
 }

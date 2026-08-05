@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
+    time::timeout,
 };
 
 use crate::{
@@ -48,20 +50,42 @@ pub async fn scan_upload(config: &ScanningConfig, input: ScanInput<'_>) -> ScanS
         };
     }
 
+    // An adapter runs inline with the upload request, so one that never returns would pin the
+    // connection and its temp file open forever.
+    let budget = Duration::from_secs(config.timeout_seconds.max(1));
     let mut reports = Vec::new();
     for adapter in &config.adapters {
-        let report = match adapter {
-            ScannerAdapterConfig::Command { program, args } => {
-                run_command_scanner(program, args, &input, config.default_on_error).await
-            }
-            ScannerAdapterConfig::Webhook { url, secret } => {
-                run_webhook_scanner(url, secret.as_deref(), &input, config.default_on_error).await
-            }
-            ScannerAdapterConfig::ClamAv { socket } => {
-                run_clamav_scanner(socket, &input, config.default_on_error).await
-            }
+        let (name, report) = match adapter {
+            ScannerAdapterConfig::Command { program, args } => (
+                "command",
+                timeout(
+                    budget,
+                    run_command_scanner(program, args, &input, config.default_on_error),
+                )
+                .await,
+            ),
+            ScannerAdapterConfig::Webhook { url, secret } => (
+                "webhook",
+                timeout(
+                    budget,
+                    run_webhook_scanner(url, secret.as_deref(), &input, config.default_on_error),
+                )
+                .await,
+            ),
+            ScannerAdapterConfig::ClamAv { socket } => (
+                "clamav",
+                timeout(
+                    budget,
+                    run_clamav_scanner(socket, &input, config.default_on_error),
+                )
+                .await,
+            ),
         };
-        reports.push(report);
+        reports.push(report.unwrap_or_else(|_| ScanReport {
+            adapter: name.to_string(),
+            decision: config.default_on_error,
+            detail: format!("scanner timed out after {}s", budget.as_secs()),
+        }));
     }
 
     let decision = reports
@@ -96,6 +120,8 @@ async fn run_command_scanner(
             write_input_to_path(input, &scan_path).await?;
         }
         let mut command = Command::new(program);
+        // Without this a timed-out scan leaves the child running unsupervised.
+        command.kill_on_drop(true);
         for arg in args {
             command.arg(expand_arg(arg, input, &scan_path));
         }
@@ -340,6 +366,51 @@ fn decision_rank(decision: &ScanDecision) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_hung_adapter_falls_back_instead_of_blocking_the_upload() {
+        // A TCP listener that accepts and then never answers, standing in for a wedged clamd.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let config = ScanningConfig {
+            enabled: true,
+            adapters: vec![ScannerAdapterConfig::ClamAv {
+                socket: addr.to_string(),
+            }],
+            default_on_error: ScanDecision::Quarantine,
+            timeout_seconds: 1,
+            ..ScanningConfig::default()
+        };
+        let bytes = Bytes::from_static(b"hello");
+        let summary = scan_upload(
+            &config,
+            ScanInput {
+                bytes: Some(&bytes),
+                path: None,
+                size_bytes: bytes.len() as i64,
+                filename: Some("hello.txt"),
+                content_type: Some("text/plain"),
+                hash: "abc",
+                public_id: "id",
+                temp_dir: None,
+            },
+        )
+        .await;
+
+        assert_eq!(summary.decision, ScanDecision::Quarantine);
+        assert!(
+            summary.reports[0].detail.contains("timed out"),
+            "unexpected detail: {}",
+            summary.reports[0].detail
+        );
+    }
 
     #[tokio::test]
     async fn disabled_scanning_allows_without_reports() {

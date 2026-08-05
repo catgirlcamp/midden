@@ -162,6 +162,12 @@ pub(super) fn validate(config: &AppConfig) -> anyhow::Result<()> {
     if config.processing.thumbnail_max_dimension == 0 {
         anyhow::bail!("processing.thumbnail_max_dimension must be greater than zero");
     }
+    if config.processing.thumbnail_source_max_pixels == 0 {
+        anyhow::bail!("processing.thumbnail_source_max_pixels must be greater than zero");
+    }
+    if config.processing.thumbnail_source_max_alloc_bytes == 0 {
+        anyhow::bail!("processing.thumbnail_source_max_alloc_bytes must be greater than zero");
+    }
     if !(1..=100).contains(&config.processing.thumbnail_jpeg_quality) {
         anyhow::bail!("processing.thumbnail_jpeg_quality must be between 1 and 100");
     }
@@ -394,6 +400,9 @@ fn validate_oidc(oidc: &OidcConfig) -> anyhow::Result<()> {
 }
 
 fn validate_scanning(scanning: &ScanningConfig) -> anyhow::Result<()> {
+    if scanning.timeout_seconds == 0 {
+        anyhow::bail!("scanning.timeout_seconds must be greater than zero");
+    }
     for adapter in &scanning.adapters {
         match adapter {
             ScannerAdapterConfig::ClamAv { socket } if socket.trim().is_empty() => {
