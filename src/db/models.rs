@@ -334,6 +334,39 @@ impl ModerationNote {
     }
 }
 
+/// Keyset pagination cursor for the public listings.
+///
+/// Ordering on `created_at` alone is not stable: uploads routinely share a second, and a cursor
+/// that only remembers the timestamp skips every tied row on the next page. Pair it with the
+/// `public_id` tiebreaker that the queries also sort on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageCursor {
+    pub created_at: i64,
+    pub public_id: String,
+}
+
+impl std::fmt::Display for PageCursor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `public_id` uses nanoid's URL-safe alphabet, which has no '.', so this round-trips.
+        write!(formatter, "{}.{}", self.created_at, self.public_id)
+    }
+}
+
+impl std::str::FromStr for PageCursor {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (created_at, public_id) = value.split_once('.').ok_or(())?;
+        if public_id.is_empty() {
+            return Err(());
+        }
+        Ok(Self {
+            created_at: created_at.parse().map_err(|_| ())?,
+            public_id: public_id.to_string(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct FileUsage {
     pub storage_bytes: i64,

@@ -195,6 +195,10 @@ impl Database {
         Ok(())
     }
 
+    /// Lists the newest reports matching every supplied filter.
+    ///
+    /// Filtering happens in the query. Fetching a fixed window and filtering afterwards hid open
+    /// reports behind newer resolved ones as soon as the table outgrew that window.
     pub async fn list_reports_filtered(
         &self,
         state: Option<&str>,
@@ -202,29 +206,27 @@ impl Database {
         reason: Option<&str>,
         created_after: Option<i64>,
     ) -> anyhow::Result<Vec<Report>> {
+        let reason_pattern = reason.map(|reason| format!("%{}%", reason.to_lowercase()));
         let rows = self.query(
             "SELECT id, item_kind, item_public_id, reporter_user_id, reason, details, state, created_at
-             FROM reports ORDER BY created_at DESC LIMIT 500",
+             FROM reports
+             WHERE (CAST(? AS TEXT) IS NULL OR state = ?)
+               AND (CAST(? AS TEXT) IS NULL OR item_kind = ?)
+               AND (CAST(? AS TEXT) IS NULL OR lower(reason) LIKE ?)
+               AND (CAST(? AS BIGINT) IS NULL OR created_at >= ?)
+             ORDER BY created_at DESC LIMIT 100",
         )
+        .bind(state)
+        .bind(state)
+        .bind(item_kind)
+        .bind(item_kind)
+        .bind(reason_pattern.as_deref())
+        .bind(reason_pattern.as_deref())
+        .bind(created_after)
+        .bind(created_after)
         .fetch_all(&self.pool)
         .await?;
-        let mut reports = rows
-            .iter()
-            .map(Report::from_row)
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        reports.retain(|report| {
-            state.is_none_or(|state| report.state == state)
-                && item_kind.is_none_or(|item_kind| report.item_kind == item_kind)
-                && reason.is_none_or(|reason| {
-                    report
-                        .reason
-                        .to_lowercase()
-                        .contains(&reason.to_lowercase())
-                })
-                && created_after.is_none_or(|created_after| report.created_at >= created_after)
-        });
-        reports.truncate(100);
-        Ok(reports)
+        rows.iter().map(Report::from_row).collect()
     }
 
     pub async fn reports_for_item(

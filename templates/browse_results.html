@@ -37,7 +37,7 @@
     <p>{% if page.q %}No public pastes matched this search.{% else %}No public pastes are listed yet.{% endif %}</p>
   {% endif %}
 
-  {% if page.next_cursor %}
-    <p><a href="/browse?before={{ page.next_cursor }}{% if page.q %}&q={{ page.q }}{% endif %}" hx-get="/browse?before={{ page.next_cursor }}{% if page.q %}&q={{ page.q }}{% endif %}" hx-target="#browse-results" hx-swap="outerHTML" hx-push-url="true">Older items</a></p>
+  {% if page.older_url %}
+    <p><a href="{{ page.older_url }}" hx-get="{{ page.older_url }}" hx-target="#browse-results" hx-swap="outerHTML" hx-push-url="true">Older items</a></p>
   {% endif %}
 </section>

@@ -151,25 +151,32 @@ impl Database {
     pub async fn public_files(
         &self,
         query: Option<&str>,
-        before: Option<i64>,
+        before: Option<&PageCursor>,
         limit: i64,
     ) -> anyhow::Result<Vec<FileItem>> {
         let pattern = query.map(|query| format!("%{}%", query.to_lowercase()));
-        let before = before.unwrap_or(i64::MAX);
+        let (before_at, before_id) = cursor_binds(before);
         let rows = if let Some(pattern) = pattern.as_deref() {
             self.query(select_file_items!(
                 "WHERE state = 'active'
                    AND visibility = 'public'
-                   AND created_at < ?
+                   AND (
+                        CAST(? AS BIGINT) IS NULL
+                     OR created_at < ?
+                     OR (created_at = ? AND public_id < ?)
+                   )
                    AND (expires_at IS NULL OR expires_at > ?)
                    AND (
                         lower(public_id) LIKE ?
                      OR lower(COALESCE(original_filename, '')) LIKE ?
                      OR lower(COALESCE(content_type, '')) LIKE ?
                    )
-                 ORDER BY created_at DESC LIMIT ?"
+                 ORDER BY created_at DESC, public_id DESC LIMIT ?"
             ))
-            .bind(before)
+            .bind(before_at)
+            .bind(before_at)
+            .bind(before_at)
+            .bind(before_id)
             .bind(util::now_ts())
             .bind(pattern)
             .bind(pattern)
@@ -181,11 +188,18 @@ impl Database {
             self.query(select_file_items!(
                 "WHERE state = 'active'
                    AND visibility = 'public'
-                   AND created_at < ?
+                   AND (
+                        CAST(? AS BIGINT) IS NULL
+                     OR created_at < ?
+                     OR (created_at = ? AND public_id < ?)
+                   )
                    AND (expires_at IS NULL OR expires_at > ?)
-                 ORDER BY created_at DESC LIMIT ?"
+                 ORDER BY created_at DESC, public_id DESC LIMIT ?"
             ))
-            .bind(before)
+            .bind(before_at)
+            .bind(before_at)
+            .bind(before_at)
+            .bind(before_id)
             .bind(util::now_ts())
             .bind(limit)
             .fetch_all(&self.pool)
@@ -197,25 +211,32 @@ impl Database {
     pub async fn public_pastes(
         &self,
         query: Option<&str>,
-        before: Option<i64>,
+        before: Option<&PageCursor>,
         limit: i64,
     ) -> anyhow::Result<Vec<Paste>> {
         let pattern = query.map(|query| format!("%{}%", query.to_lowercase()));
-        let before = before.unwrap_or(i64::MAX);
+        let (before_at, before_id) = cursor_binds(before);
         let rows = if let Some(pattern) = pattern.as_deref() {
             self.query(select_pastes!(
                 "WHERE state = 'active'
                    AND visibility = 'public'
-                   AND created_at < ?
+                   AND (
+                        CAST(? AS BIGINT) IS NULL
+                     OR created_at < ?
+                     OR (created_at = ? AND public_id < ?)
+                   )
                    AND (expires_at IS NULL OR expires_at > ?)
                    AND (
                         lower(public_id) LIKE ?
                      OR lower(COALESCE(title, '')) LIKE ?
                      OR lower(COALESCE(syntax, '')) LIKE ?
                    )
-                 ORDER BY created_at DESC LIMIT ?"
+                 ORDER BY created_at DESC, public_id DESC LIMIT ?"
             ))
-            .bind(before)
+            .bind(before_at)
+            .bind(before_at)
+            .bind(before_at)
+            .bind(before_id)
             .bind(util::now_ts())
             .bind(pattern)
             .bind(pattern)
@@ -227,16 +248,30 @@ impl Database {
             self.query(select_pastes!(
                 "WHERE state = 'active'
                    AND visibility = 'public'
-                   AND created_at < ?
+                   AND (
+                        CAST(? AS BIGINT) IS NULL
+                     OR created_at < ?
+                     OR (created_at = ? AND public_id < ?)
+                   )
                    AND (expires_at IS NULL OR expires_at > ?)
-                 ORDER BY created_at DESC LIMIT ?"
+                 ORDER BY created_at DESC, public_id DESC LIMIT ?"
             ))
-            .bind(before)
+            .bind(before_at)
+            .bind(before_at)
+            .bind(before_at)
+            .bind(before_id)
             .bind(util::now_ts())
             .bind(limit)
             .fetch_all(&self.pool)
             .await?
         };
         rows.iter().map(Paste::from_row).collect()
+    }
+}
+
+fn cursor_binds(cursor: Option<&PageCursor>) -> (Option<i64>, Option<&str>) {
+    match cursor {
+        Some(cursor) => (Some(cursor.created_at), Some(cursor.public_id.as_str())),
+        None => (None, None),
     }
 }

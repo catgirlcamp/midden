@@ -224,6 +224,201 @@ mod tests {
         second_mutation.commit().await.unwrap();
     }
 
+    async fn seed_public_file(db: &Database, public_id: &str, created_at: i64) {
+        let hash = format!("{:064x}", public_id.len() * 7 + created_at as usize);
+        db.create_blob_if_missing(&hash, 4, Some("text/plain"))
+            .await
+            .unwrap();
+        db.create_file_item(NewFileItem {
+            id: public_id,
+            public_id,
+            blob_hash: &hash,
+            original_filename: Some("f.txt"),
+            extension: Some("txt"),
+            content_type: Some("text/plain"),
+            size_bytes: 4,
+            image_width: None,
+            image_height: None,
+            owner_user_id: None,
+            delete_token_hash: None,
+            expires_at: None,
+            visibility: "public",
+            metadata_json: None,
+            thumbnail_hash: None,
+            state: "active",
+        })
+        .await
+        .unwrap();
+        db.query("UPDATE files SET created_at = ? WHERE public_id = ?")
+            .bind(created_at)
+            .bind(public_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+
+    /// Walks the public file listing the way the browse handler does and returns every id seen.
+    async fn page_through_public_files(db: &Database, limit: i64) -> Vec<String> {
+        let mut cursor: Option<PageCursor> = None;
+        let mut seen = Vec::new();
+        loop {
+            let page = db.public_files(None, cursor.as_ref(), limit).await.unwrap();
+            if page.is_empty() {
+                return seen;
+            }
+            seen.extend(page.iter().map(|file| file.public_id.clone()));
+            assert!(seen.len() < 100, "pagination did not terminate: {seen:?}");
+            cursor = page.last().map(|file| PageCursor {
+                created_at: file.created_at,
+                public_id: file.public_id.clone(),
+            });
+            if (page.len() as i64) < limit {
+                return seen;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn public_paging_returns_items_sharing_a_timestamp_exactly_once() {
+        let db = test_db().await;
+        for public_id in ["tied-a", "tied-b", "tied-c", "tied-d"] {
+            seed_public_file(&db, public_id, 5_000).await;
+        }
+        seed_public_file(&db, "older", 4_000).await;
+
+        let mut seen = page_through_public_files(&db, 2).await;
+        let total = seen.len();
+        seen.sort();
+        seen.dedup();
+
+        assert_eq!(seen.len(), total, "pagination repeated an item");
+        assert_eq!(
+            seen,
+            vec!["older", "tied-a", "tied-b", "tied-c", "tied-d"],
+            "items sharing a created_at must not fall through the cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_paging_is_stable_when_one_listing_is_much_denser() {
+        let db = test_db().await;
+        for index in 0..6 {
+            seed_public_file(&db, &format!("file{index}"), 9_000 + index).await;
+        }
+        db.create_paste(NewPaste {
+            id: "old-paste",
+            public_id: "oldpaste",
+            title: None,
+            content: "old",
+            syntax: None,
+            owner_user_id: None,
+            delete_token_hash: None,
+            expires_at: None,
+            visibility: "public",
+        })
+        .await
+        .unwrap();
+        db.query("UPDATE pastes SET created_at = 1")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        // A sparse paste listing must not drag the file cursor past unseen files.
+        let files = page_through_public_files(&db, 3).await;
+
+        assert_eq!(
+            files.len(),
+            6,
+            "every public file must remain reachable through pagination"
+        );
+    }
+
+    #[test]
+    fn page_cursors_round_trip_through_urls() {
+        let cursor = PageCursor {
+            created_at: 1_700_000_000,
+            public_id: "aB3-_xyz".to_string(),
+        };
+        assert_eq!(
+            cursor.to_string().parse::<PageCursor>().unwrap(),
+            cursor
+        );
+        assert!("nonsense".parse::<PageCursor>().is_err());
+        assert!("123.".parse::<PageCursor>().is_err());
+    }
+
+    #[tokio::test]
+    async fn report_filters_reach_past_the_newest_rows() {
+        let db = test_db().await;
+        // Bury one open report under more resolved reports than the query's row budget.
+        db.create_report("file", "buried", None, "spam", "").await.unwrap();
+        db.query("UPDATE reports SET created_at = 0")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        for index in 0..600 {
+            db.create_report("paste", &format!("noise{index}"), None, "other", "")
+                .await
+                .unwrap();
+        }
+        db.query("UPDATE reports SET state = 'resolved' WHERE item_public_id != 'buried'")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        let open = db
+            .list_reports_filtered(Some("open"), None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            open.len(),
+            1,
+            "filters must be applied by the query, not to an already-truncated page"
+        );
+        assert_eq!(open[0].item_public_id, "buried");
+    }
+
+    #[tokio::test]
+    async fn report_filters_combine_state_kind_reason_and_age() {
+        let db = test_db().await;
+        for (kind, public_id, reason) in [
+            ("file", "match", "Spam And Abuse"),
+            ("paste", "wrong-kind", "spam"),
+            ("file", "wrong-reason", "copyright"),
+        ] {
+            db.create_report(kind, public_id, None, reason, "")
+                .await
+                .unwrap();
+        }
+        db.create_report("file", "too-old", None, "spam", "")
+            .await
+            .unwrap();
+        db.query("UPDATE reports SET created_at = 0 WHERE item_public_id = 'too-old'")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        let reports = db
+            .list_reports_filtered(
+                Some("open"),
+                Some("file"),
+                Some("SPAM"),
+                Some(util::now_ts() - 60),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reports
+                .iter()
+                .map(|report| report.item_public_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["match"],
+            "reason matching stays case-insensitive and substring-based"
+        );
+    }
+
     #[tokio::test]
     async fn migrates_and_reads_runtime_settings() {
         let db = test_db().await;
