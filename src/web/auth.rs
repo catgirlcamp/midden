@@ -315,14 +315,23 @@ pub(super) async fn password_reset_request(
             state.config.server.public_base_url.trim_end_matches('/'),
             token
         );
-        let _ = state
-            .mailer
-            .send(
-                &reset_user.email,
-                "Reset your Midden password",
-                &format!("Use this link to reset your password:\n\n{reset_url}\n\nThe link expires in one hour."),
-            )
-            .await?;
+        // Deliver out of band. Awaiting the send here made both the latency and the failure mode
+        // depend on whether the address existed, which told an unauthenticated caller exactly
+        // which emails have accounts.
+        let mailer = state.mailer.clone();
+        let recipient = reset_user.email.clone();
+        tokio::spawn(async move {
+            if let Err(err) = mailer
+                .send(
+                    &recipient,
+                    "Reset your Midden password",
+                    &format!("Use this link to reset your password:\n\n{reset_url}\n\nThe link expires in one hour."),
+                )
+                .await
+            {
+                tracing::error!(error = %err, "failed to send password reset email");
+            }
+        });
     }
     render(
         &state,
@@ -379,6 +388,13 @@ pub(super) async fn password_reset_submit(
         .db
         .set_user_email_verified_at(&reset_user.id, Some(util::now_ts()))
         .await?;
+    // Recovery flow: assume the account may be compromised and cut off everything the previous
+    // holder of the password could still be using.
+    state
+        .db
+        .delete_sessions_for_user(&reset_user.id, None)
+        .await?;
+    state.db.revoke_api_tokens_for_user(&reset_user.id).await?;
     state
         .db
         .audit(

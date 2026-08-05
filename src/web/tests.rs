@@ -3505,6 +3505,167 @@ async fn oidc_callback_requires_explicit_link_for_existing_local_user() {
     );
 }
 
+async fn session_token_for(state: &AppState, user: &crate::db::User) -> String {
+    let token = util::secret_token();
+    state
+        .db
+        .create_session(&user.id, &util::hash_token(&token), util::now_ts() + 3600)
+        .await
+        .unwrap();
+    token
+}
+
+async fn session_is_live(state: &AppState, token: &str) -> bool {
+    state
+        .db
+        .user_by_session_token(&util::hash_token(token))
+        .await
+        .unwrap()
+        .is_some()
+}
+
+#[tokio::test]
+async fn password_reset_revokes_sessions_opened_before_it() {
+    let state = test_state("http://127.0.0.1".to_string()).await;
+    let user = state
+        .db
+        .create_user(
+            "reset-sessions@example.test",
+            "reset-sessions",
+            Some(&util::hash_password("old password").unwrap()),
+            Role::User,
+        )
+        .await
+        .unwrap();
+    let stolen = session_token_for(&state, &user).await;
+    let reset = util::secret_token();
+    state
+        .db
+        .create_password_reset_token(&user.id, &util::hash_token(&reset), util::now_ts() + 3600)
+        .await
+        .unwrap();
+    let csrf = util::secret_token();
+
+    let response = state
+        .clone()
+        .router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/auth/password-reset/{reset}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("midden_csrf={csrf}"))
+                .body(Body::from(format!(
+                    "password=brand%20new%20password&csrf_token={csrf}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        !session_is_live(&state, &stolen).await,
+        "resetting a password must not leave earlier sessions usable"
+    );
+}
+
+#[tokio::test]
+async fn password_change_revokes_other_sessions_but_keeps_the_current_one() {
+    let state = test_state("http://127.0.0.1".to_string()).await;
+    let user = state
+        .db
+        .create_user(
+            "change-sessions@example.test",
+            "change-sessions",
+            Some(&util::hash_password("old password").unwrap()),
+            Role::User,
+        )
+        .await
+        .unwrap();
+    let stolen = session_token_for(&state, &user).await;
+    let current = session_token_for(&state, &user).await;
+    let csrf = util::secret_token();
+
+    let response = state
+        .clone()
+        .router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/account/password")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    format!("midden_csrf={csrf}; midden_session={current}"),
+                )
+                .body(Body::from(format!(
+                    "current_password=old%20password&new_password=brand%20new%20password&csrf_token={csrf}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        !session_is_live(&state, &stolen).await,
+        "changing a password must revoke other sessions"
+    );
+    assert!(
+        session_is_live(&state, &current).await,
+        "the session performing the change should stay signed in"
+    );
+}
+
+#[tokio::test]
+async fn password_reset_requests_look_identical_for_known_and_unknown_emails() {
+    let state = test_state_with("http://127.0.0.1".to_string(), |config| {
+        // Enabled but unreachable: delivery failures must not become an existence oracle.
+        config.smtp.enabled = true;
+        config.smtp.host = Some("127.0.0.1".to_string());
+        config.smtp.port = Some(1);
+        config.smtp.from = Some("midden@example.test".to_string());
+    })
+    .await;
+    state
+        .db
+        .create_user(
+            "known@example.test",
+            "known",
+            Some("password-hash"),
+            Role::User,
+        )
+        .await
+        .unwrap();
+    let csrf = util::secret_token();
+
+    let mut statuses = Vec::new();
+    for email in ["known%40example.test", "missing%40example.test"] {
+        let response = state
+            .clone()
+            .router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/password-reset")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, format!("midden_csrf={csrf}"))
+                    .body(Body::from(format!("email={email}&csrf_token={csrf}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        statuses.push(response.status());
+    }
+
+    assert_eq!(
+        statuses[0], statuses[1],
+        "a failing mail send for a real account must not be distinguishable"
+    );
+    assert_eq!(statuses[0], StatusCode::OK);
+}
+
 async fn oidc_callback(state: &AppState, cookie_state: &str) -> Response {
     state
         .clone()

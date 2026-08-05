@@ -291,6 +291,14 @@ pub(super) async fn account_change_password(
     }
     let new_hash = util::hash_password(&form.new_password)?;
     state.db.update_user_password(&user.id, &new_hash).await?;
+    // Sign out anyone else holding a session for this account, but keep the caller signed in.
+    let current_session = jar
+        .get(&state.config.security.session_cookie_name)
+        .map(|cookie| util::hash_token(cookie.value()));
+    state
+        .db
+        .delete_sessions_for_user(&user.id, current_session.as_deref())
+        .await?;
     state
         .db
         .audit(

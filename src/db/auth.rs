@@ -381,6 +381,40 @@ impl Database {
         row.map(|row| User::from_row(&row)).transpose()
     }
 
+    /// Drops every session for a user, optionally sparing the one making the request.
+    pub async fn delete_sessions_for_user(
+        &self,
+        user_id: &str,
+        keep_token_hash: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        let result = match keep_token_hash {
+            Some(keep) => {
+                self.query("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?")
+                    .bind(user_id)
+                    .bind(keep)
+                    .execute(&self.pool)
+                    .await?
+            }
+            None => {
+                self.query("DELETE FROM sessions WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(&self.pool)
+                    .await?
+            }
+        };
+        Ok(result.rows_affected())
+    }
+
+    pub async fn revoke_api_tokens_for_user(&self, user_id: &str) -> anyhow::Result<u64> {
+        let result = self
+            .query("UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+            .bind(util::now_ts())
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn delete_session(&self, token_hash: &str) -> anyhow::Result<()> {
         self.query("DELETE FROM sessions WHERE token_hash = ?")
             .bind(token_hash)
