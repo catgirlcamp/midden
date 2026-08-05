@@ -273,9 +273,14 @@ pub(super) async fn raw_file(
 pub(super) async fn thumbnail_file(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<Response> {
     let settings = state.settings().await?;
+    // Thumbnails are file content and must follow the same origin rules as the raw bytes.
+    if settings.delivery.isolated_file_origin && !is_isolated_file_host(&settings, &headers) {
+        return Err(AppError::NotFound);
+    }
     let user = current_user(&state, &jar).await?;
     let file = state
         .db
@@ -294,6 +299,7 @@ pub(super) async fn thumbnail_file(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    insert_file_security_headers(&mut response, is_isolated_file_host(&settings, &headers));
     insert_cache_control(
         &mut response,
         settings.delivery.public_cache_seconds,
@@ -368,12 +374,12 @@ async fn serve_file(
             let (start_bound, end_bound) = ranges[0];
             let start = match start_bound {
                 std::ops::Bound::Included(n) => n,
-                std::ops::Bound::Excluded(n) => n + 1,
+                std::ops::Bound::Excluded(n) => n.saturating_add(1),
                 std::ops::Bound::Unbounded => 0,
             };
             let end = match end_bound {
                 std::ops::Bound::Included(n) => n,
-                std::ops::Bound::Excluded(n) => n - 1,
+                std::ops::Bound::Excluded(n) => n.saturating_sub(1),
                 std::ops::Bound::Unbounded => total_len.saturating_sub(1),
             };
 

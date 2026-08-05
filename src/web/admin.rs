@@ -678,8 +678,8 @@ pub(super) async fn admin_update_settings(
             .unwrap_or(security.content_policy.max_filename_bytes)
             .max(1);
     security.url_upload.block_private_ips = form.url_block_private_ips.is_some();
-    security.url_upload.max_redirects =
-        parse_optional_usize(form.url_max_redirects.as_deref())?.unwrap_or(3);
+    security.url_upload.max_redirects = parse_optional_usize(form.url_max_redirects.as_deref())?
+        .unwrap_or(security.url_upload.max_redirects);
     security.url_upload.connect_timeout_seconds =
         parse_optional_u64(form.url_connect_timeout_seconds.as_deref())?
             .unwrap_or(security.url_upload.connect_timeout_seconds)

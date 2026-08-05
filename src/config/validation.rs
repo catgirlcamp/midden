@@ -90,6 +90,7 @@ pub(super) fn validate(config: &AppConfig) -> anyhow::Result<()> {
     ) {
         anyhow::bail!("branding.dark_mode must be auto, light, or dark");
     }
+    validate_css_color("branding.accent_color", &config.branding.accent_color)?;
     if config.security.session_cookie_name.trim().is_empty() {
         anyhow::bail!("security.session_cookie_name must not be empty");
     }
@@ -238,6 +239,31 @@ fn nonempty_option(value: &Option<String>) -> Option<&str> {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// Checks that a value is safe to interpolate into a CSS declaration.
+///
+/// The accent colour lands inside a `<style>` block, where HTML escaping does nothing useful: the
+/// CSS parser never decodes entities. Without this, anyone who can reach the admin settings form
+/// could close the declaration and append rules that run for every visitor.
+fn validate_css_color(label: &str, value: &str) -> anyhow::Result<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+    if value.len() > 64 {
+        anyhow::bail!("{label} must be at most 64 characters");
+    }
+    // `/` is permitted for the modern `oklch(l c h / alpha)` form. `*` is not, so `/*` cannot
+    // start a comment, and `;`, `{`, `}` cannot end the declaration or open a new rule.
+    let allowed = |character: char| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, ' ' | '#' | '(' | ')' | ',' | '.' | '%' | '-' | '+' | '/')
+    };
+    if let Some(character) = value.chars().find(|character| !allowed(*character)) {
+        anyhow::bail!("{label} contains a character that is not valid in a CSS color: {character:?}");
+    }
+    Ok(())
 }
 
 fn validate_http_url(label: &str, value: &str) -> anyhow::Result<url::Url> {
@@ -418,4 +444,40 @@ fn validate_scanning(scanning: &ScanningConfig) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn css_colors_accept_the_shapes_the_ui_offers() {
+        for value in [
+            "oklch(0.44 0.12 235)",
+            "oklch(0.44 0.12 235 / 50%)",
+            "#4488cc",
+            "rebeccapurple",
+            "rgb(12, 34, 56)",
+        ] {
+            validate_css_color("accent", value).unwrap_or_else(|err| panic!("{value:?}: {err}"));
+        }
+    }
+
+    #[test]
+    fn css_colors_reject_attempts_to_escape_the_declaration() {
+        for value in [
+            "red; } body { display: none",
+            "red /* comment */",
+            "red\"",
+            "url('x')",
+            "var(--x); @import 'evil'",
+        ] {
+            assert!(
+                validate_css_color("accent", value).is_err(),
+                "{value:?} should not be accepted"
+            );
+        }
+        assert!(validate_css_color("accent", "").is_err());
+        assert!(validate_css_color("accent", &"a".repeat(65)).is_err());
+    }
 }

@@ -3898,11 +3898,30 @@ async fn moderation_webhook_notifies_external_service() {
     let base = spawn_http_app(state.clone()).await;
     let client = reqwest::Client::new();
 
+    let upload: serde_json::Value = client
+        .post(format!("{base}/api/v1/files"))
+        .multipart(
+            reqwest::multipart::Form::new().part(
+                "file",
+                reqwest::multipart::Part::bytes(b"reportable".to_vec())
+                    .file_name("reportable.txt")
+                    .mime_str("text/plain")
+                    .unwrap(),
+            ),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let file_id = upload["id"].as_str().unwrap().to_string();
+
     let response = client
         .post(format!("{base}/api/v1/reports"))
         .json(&serde_json::json!({
             "kind": "file",
-            "id": "file-123",
+            "id": file_id,
             "reason": "abuse",
             "details": "webhook test"
         }))
@@ -3914,9 +3933,32 @@ async fn moderation_webhook_notifies_external_service() {
     let request_str = rx.recv().await.expect("webhook not received");
     assert!(request_str.contains("x-midden-moderation-secret: my-secret"));
     assert!(request_str.contains("\"kind\":\"file\""));
-    assert!(request_str.contains("\"id\":\"file-123\""));
+    assert!(request_str.contains(&format!("\"id\":\"{file_id}\"")));
     assert!(request_str.contains("\"reason\":\"abuse\""));
     assert!(request_str.contains("\"details\":\"webhook test\""));
+}
+
+#[tokio::test]
+async fn reports_for_unknown_items_are_rejected() {
+    let state = test_state("http://127.0.0.1".to_string()).await;
+    let base = spawn_http_app(state).await;
+
+    assert_eq!(
+        reqwest::Client::new()
+            .post(format!("{base}/api/v1/reports"))
+            .json(&serde_json::json!({
+                "kind": "file",
+                "id": "never-existed",
+                "reason": "abuse",
+                "details": ""
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND,
+        "reports must name a real item so the moderation queue stays actionable"
+    );
 }
 
 #[tokio::test]

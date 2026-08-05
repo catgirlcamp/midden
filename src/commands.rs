@@ -400,6 +400,15 @@ pub async fn create_report(
     reason: &str,
     details: &str,
 ) -> AppResult<ReportCreated> {
+    // Reports on items that never existed only cost moderators time. Items in any state are
+    // reportable, since someone may be reporting something they saw before a takedown.
+    let exists = match kind {
+        ItemKind::File => state.db.file_by_public_id(id).await.is_ok(),
+        ItemKind::Paste => state.db.paste_by_public_id_any(id).await.is_ok(),
+    };
+    if !exists {
+        return Err(AppError::NotFound);
+    }
     state
         .db
         .create_report(kind.as_str(), id, reporter_user_id, reason, details)
