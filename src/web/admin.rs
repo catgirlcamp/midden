@@ -222,7 +222,7 @@ pub(super) async fn admin_create_user(
     if role_requires_owner_actor(role, user.as_ref()) {
         return Err(AppError::Forbidden);
     }
-    let password_hash = util::hash_password(&form.password)?;
+    let password_hash = util::hash_password(&form.password).await?;
     let created = state
         .db
         .create_user(&form.email, &form.username, Some(&password_hash), role)

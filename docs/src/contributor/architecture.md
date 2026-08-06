@@ -55,6 +55,16 @@ Handlers call `state.settings().await` to load runtime settings merged from conf
 
 Keep route registration centralized unless there is a clear reason to split it further. The `/{slug}` file route is a catch-all and must remain after more specific routes.
 
+### Blocking Work
+
+Handlers share a small pool of runtime workers, so anything CPU-bound has to move to `spawn_blocking` before it can stall unrelated requests. This applies to work whose cost an untrusted caller influences:
+
+- Password hashing and verification. `util::hash_password` and `util::verify_password` are async and do this for you; the argon2 calls themselves are private to `src/util.rs` so there is no way to reach them from a handler by accident.
+- Thumbnail decoding, sized by an image's declared dimensions rather than its bytes.
+- Paste syntax highlighting, sized by paste length.
+
+When adding something similar, prefer making the async wrapper the only reachable API rather than relying on reviewers to notice.
+
 ## Persistence
 
 `src/db.rs` and `src/db/` contain schema, models, auth, item, moderation, search, and settings methods. The schema string creates tables for settings, users, sessions, API tokens, auth flows, blobs, files, pastes, revisions, reports, scanner results, audit events, rate-limit buckets, and moderation notes.

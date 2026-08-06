@@ -2213,7 +2213,7 @@ async fn secure_cookie_runtime_setting_applies_to_all_auth_cookies() {
         .create_user(
             "secure-cookie@example.test",
             "secure-cookie",
-            Some(&util::hash_password("correct horse").unwrap()),
+            Some(&util::hash_password("correct horse").await.unwrap()),
             Role::User,
         )
         .await
@@ -3532,7 +3532,7 @@ async fn password_reset_revokes_sessions_opened_before_it() {
         .create_user(
             "reset-sessions@example.test",
             "reset-sessions",
-            Some(&util::hash_password("old password").unwrap()),
+            Some(&util::hash_password("old password").await.unwrap()),
             Role::User,
         )
         .await
@@ -3578,7 +3578,7 @@ async fn password_change_revokes_other_sessions_but_keeps_the_current_one() {
         .create_user(
             "change-sessions@example.test",
             "change-sessions",
-            Some(&util::hash_password("old password").unwrap()),
+            Some(&util::hash_password("old password").await.unwrap()),
             Role::User,
         )
         .await

@@ -286,10 +286,10 @@ pub(super) async fn account_change_password(
             "OIDC-only accounts do not have a local password".to_string(),
         ));
     };
-    if !util::verify_password(&form.current_password, password_hash) {
+    if !util::verify_password(&form.current_password, password_hash).await {
         return Err(AppError::Unauthorized);
     }
-    let new_hash = util::hash_password(&form.new_password)?;
+    let new_hash = util::hash_password(&form.new_password).await?;
     state.db.update_user_password(&user.id, &new_hash).await?;
     // Sign out anyone else holding a session for this account, but keep the caller signed in.
     let current_session = jar
@@ -338,7 +338,7 @@ pub(super) async fn account_enable_two_factor(
             "verify your email before enabling two-factor authentication".to_string(),
         ));
     }
-    verify_current_password(&user, &form.current_password)?;
+    verify_current_password(&user, &form.current_password).await?;
     state.db.set_user_two_factor_enabled(&user.id, true).await?;
     state
         .db
@@ -363,7 +363,7 @@ pub(super) async fn account_disable_two_factor(
         .await?
         .ok_or(AppError::Unauthorized)?;
     validate_csrf(&jar, form.csrf_token.as_deref())?;
-    verify_current_password(&user, &form.current_password)?;
+    verify_current_password(&user, &form.current_password).await?;
     state
         .db
         .set_user_two_factor_enabled(&user.id, false)
@@ -380,13 +380,13 @@ pub(super) async fn account_disable_two_factor(
     Ok(Redirect::to("/account"))
 }
 
-fn verify_current_password(user: &User, password: &str) -> AppResult<()> {
+async fn verify_current_password(user: &User, password: &str) -> AppResult<()> {
     let Some(password_hash) = &user.password_hash else {
         return Err(AppError::BadRequest(
             "OIDC-only accounts do not have a local password".to_string(),
         ));
     };
-    if !util::verify_password(password, password_hash) {
+    if !util::verify_password(password, password_hash).await {
         return Err(AppError::Unauthorized);
     }
     Ok(())

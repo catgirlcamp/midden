@@ -56,7 +56,7 @@ pub(super) async fn login(
             .await?;
         return Err(AppError::Unauthorized);
     };
-    if !util::verify_password(&form.password, password_hash) {
+    if !util::verify_password(&form.password, password_hash).await {
         state
             .db
             .audit(
@@ -379,7 +379,7 @@ pub(super) async fn password_reset_submit(
         .consume_password_reset_token(&util::hash_token(&token))
         .await
         .map_err(|_| AppError::BadRequest("invalid or expired password reset token".to_string()))?;
-    let password_hash = util::hash_password(&form.password)?;
+    let password_hash = util::hash_password(&form.password).await?;
     state
         .db
         .update_user_password(&reset_user.id, &password_hash)
@@ -493,7 +493,7 @@ pub(super) async fn register(
         return Ok(Redirect::to("/account"));
     }
     validate_csrf(&jar, form.csrf_token.as_deref())?;
-    let password_hash = util::hash_password(&form.password)?;
+    let password_hash = util::hash_password(&form.password).await?;
     let requires_email_verification =
         matches!(settings.policy.signup, crate::config::SignupMode::Open) && state.mailer.enabled();
     let created = if matches!(

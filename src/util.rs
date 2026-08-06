@@ -43,7 +43,31 @@ pub fn hash_token(token: &str) -> String {
     sha256_hex(token.as_bytes())
 }
 
-pub fn hash_password(password: &str) -> anyhow::Result<String> {
+/// Hashes a password on the blocking pool.
+///
+/// Argon2 is deliberately CPU- and memory-hard; a single call is measured in tens of milliseconds.
+/// Running it inline would let a burst of sign-ins stall every other request sharing that worker.
+pub async fn hash_password(password: &str) -> anyhow::Result<String> {
+    let password = password.to_string();
+    tokio::task::spawn_blocking(move || hash_password_blocking(&password)).await?
+}
+
+/// Verifies a password on the blocking pool. Verification costs the same as hashing.
+pub async fn verify_password(password: &str, encoded: &str) -> bool {
+    let password = password.to_string();
+    let encoded = encoded.to_string();
+    match tokio::task::spawn_blocking(move || verify_password_blocking(&password, &encoded)).await {
+        Ok(verified) => verified,
+        Err(err) => {
+            // Only reachable if the hashing task panicked. Fail closed.
+            tracing::error!(error = %err, "password verification task failed");
+            false
+        }
+    }
+}
+
+/// Deliberately private: reaching argon2 from async code must go through the pool above.
+fn hash_password_blocking(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     Ok(Argon2::default()
         .hash_password(password.as_bytes(), &salt)
@@ -51,7 +75,7 @@ pub fn hash_password(password: &str) -> anyhow::Result<String> {
         .to_string())
 }
 
-pub fn verify_password(password: &str, encoded: &str) -> bool {
+fn verify_password_blocking(password: &str, encoded: &str) -> bool {
     let Ok(hash) = PasswordHash::new(encoded) else {
         return false;
     };
@@ -254,9 +278,42 @@ mod tests {
 
     #[test]
     fn password_round_trip() {
-        let hash = hash_password("correct horse").unwrap();
-        assert!(verify_password("correct horse", &hash));
-        assert!(!verify_password("wrong", &hash));
+        let hash = hash_password_blocking("correct horse").unwrap();
+        assert!(verify_password_blocking("correct horse", &hash));
+        assert!(!verify_password_blocking("wrong", &hash));
+    }
+
+    #[tokio::test]
+    async fn password_work_yields_instead_of_occupying_the_worker() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // `#[tokio::test]` runs on a current-thread runtime, so a spawned task cannot make any
+        // progress until the task below yields. If argon2 ran inline, the flag would still be
+        // false once hashing finished.
+        let hashed = Arc::new(AtomicBool::new(false));
+        let flag = hashed.clone();
+        let other = tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
+
+        let hash = hash_password("correct horse").await.unwrap();
+        assert!(
+            hashed.load(Ordering::SeqCst),
+            "hashing occupied the runtime worker instead of moving to the blocking pool"
+        );
+
+        let verified = Arc::new(AtomicBool::new(false));
+        let flag = verified.clone();
+        let another = tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
+
+        assert!(verify_password("correct horse", &hash).await);
+        assert!(
+            verified.load(Ordering::SeqCst),
+            "verification occupied the runtime worker instead of moving to the blocking pool"
+        );
+
+        assert!(!verify_password("wrong", &hash).await);
+        other.await.unwrap();
+        another.await.unwrap();
     }
 
     #[test]

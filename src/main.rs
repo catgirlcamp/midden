@@ -183,7 +183,7 @@ async fn owner_command(config: AppConfig, command: OwnerCommand) -> anyhow::Resu
             password,
         } => {
             let password_hash = match password {
-                Some(p) => Some(util::hash_password(&p)?),
+                Some(p) => Some(util::hash_password(&p).await?),
                 None => None,
             };
             let user = db
@@ -193,7 +193,7 @@ async fn owner_command(config: AppConfig, command: OwnerCommand) -> anyhow::Resu
         }
         OwnerCommand::ResetPassword { email, password } => {
             let current = db.user_by_email(&email).await?;
-            let password_hash = util::hash_password(&password)?;
+            let password_hash = util::hash_password(&password).await?;
             let user = db
                 .upsert_owner(&email, &current.username, Some(&password_hash))
                 .await?;
