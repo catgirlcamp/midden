@@ -1726,11 +1726,21 @@ async fn rate_limits_ignore_forwarded_hops_the_client_prepended() {
 
     // The right-most hop is what our own proxy appended; everything left of it is caller-supplied.
     assert_eq!(
-        upload_once(&client, &base, &[("x-forwarded-for", "203.0.113.1, 198.51.100.10")]).await,
+        upload_once(
+            &client,
+            &base,
+            &[("x-forwarded-for", "203.0.113.1, 198.51.100.10")]
+        )
+        .await,
         StatusCode::OK
     );
     assert_eq!(
-        upload_once(&client, &base, &[("x-forwarded-for", "203.0.113.2, 198.51.100.10")]).await,
+        upload_once(
+            &client,
+            &base,
+            &[("x-forwarded-for", "203.0.113.2, 198.51.100.10")]
+        )
+        .await,
         StatusCode::TOO_MANY_REQUESTS,
         "rotating a spoofed leading hop must not mint a fresh rate-limit bucket"
     );
@@ -1969,7 +1979,11 @@ async fn invite_only_registration_without_a_token_does_not_create_user() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(
-        state.db.user_by_email("no-invite@example.test").await.is_err(),
+        state
+            .db
+            .user_by_email("no-invite@example.test")
+            .await
+            .is_err(),
         "omitting invite_token must not smuggle an account past invite-only signup"
     );
 }
@@ -1983,7 +1997,12 @@ async fn invite_only_registration_consumes_the_invite_and_applies_its_role() {
     let invite = util::secret_token();
     state
         .db
-        .create_invite_token(&util::hash_token(&invite), "admin-user", Role::Moderator, None)
+        .create_invite_token(
+            &util::hash_token(&invite),
+            "admin-user",
+            Role::Moderator,
+            None,
+        )
         .await
         .unwrap();
     let csrf = util::secret_token();
@@ -2013,7 +2032,11 @@ async fn invite_only_registration_consumes_the_invite_and_applies_its_role() {
     ))
     .await;
     assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
-    let user = state.db.user_by_email("invited@example.test").await.unwrap();
+    let user = state
+        .db
+        .user_by_email("invited@example.test")
+        .await
+        .unwrap();
     assert_eq!(user.role, Role::Moderator);
 
     let replayed = register(format!(
@@ -3705,7 +3728,12 @@ async fn oidc_login_keeps_roles_that_have_no_claim_mapping() {
         .unwrap();
     state
         .db
-        .link_oidc_identity(&user.id, &issuer, "subject-keep-role", "moderator@example.test")
+        .link_oidc_identity(
+            &user.id,
+            &issuer,
+            "subject-keep-role",
+            "moderator@example.test",
+        )
         .await
         .unwrap();
 
@@ -3743,7 +3771,12 @@ async fn oidc_login_still_applies_a_matching_role_mapping() {
         .unwrap();
     state
         .db
-        .link_oidc_identity(&user.id, &issuer, "subject-apply-role", "promoted@example.test")
+        .link_oidc_identity(
+            &user.id,
+            &issuer,
+            "subject-apply-role",
+            "promoted@example.test",
+        )
         .await
         .unwrap();
 

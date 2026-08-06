@@ -290,9 +290,7 @@ async fn cleanup_temp_files(settings: &RuntimeSettings) -> anyhow::Result<u64> {
             continue;
         }
         // An in-flight upload keeps writing, so age by last modification rather than creation.
-        let stale = metadata
-            .modified()
-            .is_ok_and(|modified| modified <= cutoff);
+        let stale = metadata.modified().is_ok_and(|modified| modified <= cutoff);
         if stale && tokio::fs::remove_file(entry.path()).await.is_ok() {
             deleted += 1;
         }
@@ -330,7 +328,10 @@ mod tests {
     use super::*;
     use crate::config::AppConfig;
 
-    fn settings_with_temp_dir(directory: &std::path::Path, max_age_seconds: u64) -> RuntimeSettings {
+    fn settings_with_temp_dir(
+        directory: &std::path::Path,
+        max_age_seconds: u64,
+    ) -> RuntimeSettings {
         let mut settings = RuntimeSettings::from_config(&AppConfig::default());
         settings.uploads.temp_dir = Some(directory.to_path_buf());
         settings.uploads.temp_file_max_age_seconds = max_age_seconds;
@@ -338,8 +339,7 @@ mod tests {
     }
 
     async fn age(path: &std::path::Path, seconds: u64) {
-        let when =
-            std::time::SystemTime::now() - Duration::from_secs(seconds);
+        let when = std::time::SystemTime::now() - Duration::from_secs(seconds);
         let file = std::fs::File::options().write(true).open(path).unwrap();
         file.set_modified(when).unwrap();
     }
@@ -366,10 +366,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(deleted, 2);
-        assert!(!directory.path().join("midden-upload-abandoned.part").exists());
+        assert!(
+            !directory
+                .path()
+                .join("midden-upload-abandoned.part")
+                .exists()
+        );
         assert!(!directory.path().join("midden-scan-timed-out").exists());
         assert!(
-            directory.path().join("midden-upload-in-flight.part").exists(),
+            directory
+                .path()
+                .join("midden-upload-in-flight.part")
+                .exists(),
             "a recently written scratch file may still belong to a live upload"
         );
         assert!(

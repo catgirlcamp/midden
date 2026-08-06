@@ -339,10 +339,7 @@ mod tests {
             created_at: 1_700_000_000,
             public_id: "aB3-_xyz".to_string(),
         };
-        assert_eq!(
-            cursor.to_string().parse::<PageCursor>().unwrap(),
-            cursor
-        );
+        assert_eq!(cursor.to_string().parse::<PageCursor>().unwrap(), cursor);
         assert!("nonsense".parse::<PageCursor>().is_err());
         assert!("123.".parse::<PageCursor>().is_err());
     }
@@ -351,7 +348,9 @@ mod tests {
     async fn report_filters_reach_past_the_newest_rows() {
         let db = test_db().await;
         // Bury one open report under more resolved reports than the query's row budget.
-        db.create_report("file", "buried", None, "spam", "").await.unwrap();
+        db.create_report("file", "buried", None, "spam", "")
+            .await
+            .unwrap();
         db.query("UPDATE reports SET created_at = 0")
             .execute(&db.pool)
             .await

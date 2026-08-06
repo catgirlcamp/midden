@@ -247,10 +247,11 @@ fn can_edit_paste(settings: &RuntimeSettings, user: Option<&User>, paste: &Paste
 
 /// Syntect's bundled definitions deserialize several megabytes each. Building them per request
 /// made every view of a highlighted paste an unauthenticated CPU sink.
-static HIGHLIGHTING: std::sync::LazyLock<Highlighting> = std::sync::LazyLock::new(|| Highlighting {
-    syntaxes: syntect::parsing::SyntaxSet::load_defaults_newlines(),
-    themes: syntect::highlighting::ThemeSet::load_defaults(),
-});
+static HIGHLIGHTING: std::sync::LazyLock<Highlighting> =
+    std::sync::LazyLock::new(|| Highlighting {
+        syntaxes: syntect::parsing::SyntaxSet::load_defaults_newlines(),
+        themes: syntect::highlighting::ThemeSet::load_defaults(),
+    });
 
 struct Highlighting {
     syntaxes: syntect::parsing::SyntaxSet,

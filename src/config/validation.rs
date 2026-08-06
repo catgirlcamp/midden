@@ -258,10 +258,15 @@ fn validate_css_color(label: &str, value: &str) -> anyhow::Result<()> {
     // start a comment, and `;`, `{`, `}` cannot end the declaration or open a new rule.
     let allowed = |character: char| {
         character.is_ascii_alphanumeric()
-            || matches!(character, ' ' | '#' | '(' | ')' | ',' | '.' | '%' | '-' | '+' | '/')
+            || matches!(
+                character,
+                ' ' | '#' | '(' | ')' | ',' | '.' | '%' | '-' | '+' | '/'
+            )
     };
     if let Some(character) = value.chars().find(|character| !allowed(*character)) {
-        anyhow::bail!("{label} contains a character that is not valid in a CSS color: {character:?}");
+        anyhow::bail!(
+            "{label} contains a character that is not valid in a CSS color: {character:?}"
+        );
     }
     Ok(())
 }

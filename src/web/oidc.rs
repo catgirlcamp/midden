@@ -411,11 +411,13 @@ fn bool_claim<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(match Option::<serde_json::Value>::deserialize(deserializer)? {
-        Some(serde_json::Value::Bool(value)) => Some(value),
-        Some(serde_json::Value::String(value)) => value.parse().ok(),
-        _ => None,
-    })
+    Ok(
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Bool(value)) => Some(value),
+            Some(serde_json::Value::String(value)) => value.parse().ok(),
+            _ => None,
+        },
+    )
 }
 
 async fn discovery(state: &AppState) -> AppResult<Discovery> {

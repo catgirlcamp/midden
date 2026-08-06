@@ -28,7 +28,10 @@ pub(super) async fn public_browse(
     // rows the sparser list already returned.
     let before_file = parse_cursor(query.before_file.as_deref())?;
     let before_paste = parse_cursor(query.before_paste.as_deref())?;
-    let files = state.db.public_files(q, before_file.as_ref(), limit).await?;
+    let files = state
+        .db
+        .public_files(q, before_file.as_ref(), limit)
+        .await?;
     let pastes = state
         .db
         .public_pastes(q, before_paste.as_ref(), limit)
@@ -51,13 +54,8 @@ pub(super) async fn public_browse(
         })
         .or(before_paste);
     let has_more = files.len() as i64 >= limit || pastes.len() as i64 >= limit;
-    let older_url = has_more.then(|| {
-        older_url(
-            q,
-            next_file_cursor.as_ref(),
-            next_paste_cursor.as_ref(),
-        )
-    });
+    let older_url =
+        has_more.then(|| older_url(q, next_file_cursor.as_ref(), next_paste_cursor.as_ref()));
 
     render(
         &state,
@@ -136,7 +134,10 @@ mod tests {
     fn blank_cursors_are_treated_as_absent_and_junk_is_rejected() {
         assert!(parse_cursor(Some("  ")).unwrap().is_none());
         assert!(parse_cursor(None).unwrap().is_none());
-        assert_eq!(parse_cursor(Some("10.abc")).unwrap(), Some(cursor(10, "abc")));
+        assert_eq!(
+            parse_cursor(Some("10.abc")).unwrap(),
+            Some(cursor(10, "abc"))
+        );
         assert!(parse_cursor(Some("not-a-cursor")).is_err());
     }
 }
