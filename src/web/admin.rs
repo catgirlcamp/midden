@@ -125,7 +125,7 @@ pub(super) async fn admin_search(
         serde_json::json!({
             "q": q,
             "paste_content": query.paste_content.unwrap_or(false),
-            "files": files,
+            "files": linked_files(&state, &settings, &files)?,
             "pastes": pastes,
         }),
     )
@@ -1131,7 +1131,7 @@ pub(super) async fn admin_item(
     if !policy::can_moderate(user.as_ref()) {
         return Err(AppError::Forbidden);
     }
-    let item = moderation_item_json(&state, &kind, &id).await?;
+    let item = moderation_item_json(&state, &settings, &kind, &id).await?;
     let reports = state.db.reports_for_item(&kind, &id).await?;
     let scans = state.db.scan_results_for_item(&kind, &id).await?;
     let audits = state.db.audit_events_for_target(&id).await?;
@@ -1215,6 +1215,7 @@ pub(super) async fn admin_update_item(
 
 async fn moderation_item_json(
     state: &AppState,
+    settings: &RuntimeSettings,
     kind: &str,
     id: &str,
 ) -> AppResult<serde_json::Value> {
@@ -1227,6 +1228,10 @@ async fn moderation_item_json(
                 .map_err(|_| AppError::NotFound)?;
             Ok(serde_json::json!({
                 "public_id": file.public_id,
+                // Resolved here because which origin serves a file depends on the delivery
+                // settings and the file's own visibility.
+                "url": file_url(state, settings, &file),
+                "raw_url": raw_file_url(state, settings, &file),
                 "filename": file.original_filename,
                 "content_type": file.content_type,
                 "size_bytes": file.size_bytes,

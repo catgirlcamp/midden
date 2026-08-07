@@ -9,10 +9,11 @@ use axum::{
     Router,
     body::Bytes,
     extract::{
-        DefaultBodyLimit, Multipart, Path, Query, Request, State, connect_info::ConnectInfo,
+        DefaultBodyLimit, MatchedPath, Multipart, Path, Query, Request, State,
+        connect_info::ConnectInfo,
     },
     handler::Handler,
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{delete, get, patch, post},
@@ -82,6 +83,8 @@ pub struct RequestContext {
     pub is_htmx: bool,
     /// Address of the socket the request arrived on, before any forwarding headers are consulted.
     pub peer_ip: Option<IpAddr>,
+    /// Host the request was addressed to, resolved once from the URI authority or `Host` header.
+    pub request_origin: Option<RequestOrigin>,
 }
 
 tokio::task_local! {
@@ -109,7 +112,8 @@ async fn request_context_middleware(
                 .into_response();
         }
     };
-    let isolated_file_host = is_isolated_file_host(&settings, &headers);
+    let request_origin = RequestOrigin::from_request(request.uri(), &headers);
+    let isolated_file_host = matches_file_host(&settings, request_origin.as_ref());
     let current_user = if isolated_file_host {
         None
     } else {
@@ -162,6 +166,7 @@ async fn request_context_middleware(
         csrf_token: csrf_token.clone(),
         is_htmx,
         peer_ip,
+        request_origin,
     };
 
     let mut response = REQUEST_CONTEXT
@@ -178,6 +183,18 @@ async fn request_context_middleware(
     }
     response
 }
+
+/// Route patterns the isolated file origin is allowed to answer.
+///
+/// These are matched against `MatchedPath`, so the list is checked against the routes the router
+/// actually registered rather than against a re-implementation of path matching. A new app route
+/// cannot become reachable on the file host by being forgotten here — it has to be added.
+const FILE_HOST_ROUTES: &[&str] = &[
+    "/files/{id}/raw",
+    "/files/{id}/thumbnail",
+    "/{slug}",
+    "/robots.txt",
+];
 
 pub fn router(state: AppState) -> Router {
     let metrics_state = state.clone();
@@ -305,47 +322,42 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Restricts the isolated file origin to the routes that serve file bytes.
 async fn file_origin_middleware(
     State(state): State<AppState>,
     headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Response {
-    let Ok(settings) = state.settings().await else {
+    // `/healthz` skips the request context, so it has no cached settings to reuse and no reason to
+    // pay for a database round trip on every probe.
+    if request.uri().path() == "/healthz" {
         return next.run(request).await;
+    }
+    let settings = match state.settings().await {
+        Ok(settings) => settings,
+        // Failing open here would serve the whole application from the file origin. The request
+        // context middleware already rejects this case; this is the belt to its braces.
+        Err(err) => {
+            tracing::error!(error = %err, "failed to load settings in file origin middleware");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Html("internal server error".to_string()),
+            )
+                .into_response();
+        }
     };
-    if is_isolated_file_host(&settings, &headers) && !is_public_file_path(request.uri().path()) {
+    if is_isolated_file_host(&settings, &headers) && !is_file_host_route(&request) {
         return AppError::NotFound.into_response();
     }
     next.run(request).await
 }
 
-fn is_public_file_path(path: &str) -> bool {
-    if path.starts_with("/files/") && (path.ends_with("/raw") || path.ends_with("/thumbnail")) {
-        return true;
-    }
-    let Some(slug) = path.strip_prefix('/') else {
-        return false;
-    };
-    if slug.is_empty()
-        || slug.contains('/')
-        || matches!(
-            slug,
-            "account"
-                | "admin"
-                | "api"
-                | "browse"
-                | "healthz"
-                | "metrics"
-                | "readyz"
-                | "register"
-                | "robots.txt"
-                | "url-upload"
-        )
-    {
-        return false;
-    }
-    util::split_slug(slug).is_some()
+fn is_file_host_route(request: &Request) -> bool {
+    request
+        .extensions()
+        .get::<MatchedPath>()
+        .is_some_and(|matched| FILE_HOST_ROUTES.contains(&matched.as_str()))
 }
 
 async fn request_metrics_middleware(

@@ -4,6 +4,16 @@
 {% block content %}
   <h2>Moderate {{ page.kind }} {{ page.id }}</h2>
 
+  <p class="result-actions">
+    {% if page.kind == "file" %}
+      <a href="{{ page.item.url }}">Open file</a>
+      <a href="{{ page.item.raw_url }}">Open raw file</a>
+    {% else %}
+      <a href="/p/{{ page.id }}">Open paste</a>
+      <a href="/p/{{ page.id }}/raw">Open raw paste</a>
+    {% endif %}
+  </p>
+
   <h3>Metadata</h3>
   <table class="meta-table table-card">
     <tbody>

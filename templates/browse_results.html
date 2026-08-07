@@ -6,7 +6,7 @@
       <tbody>
       {% for file in page.files %}
         <tr>
-          <td data-label="File"><a href="/{{ file.public_id }}{% if file.extension %}.{{ file.extension }}{% endif %}">{{ file.original_filename or file.public_id }}</a></td>
+          <td data-label="File"><a href="{{ file.url }}">{{ file.original_filename or file.public_id }}</a></td>
           <td data-label="Type">{{ file.content_type or "" }}</td>
           <td data-label="Size">{{ human_bytes(file.size_bytes) }}</td>
           <td data-label="Created">{{ file.created_at }}</td>

@@ -4234,3 +4234,620 @@ async fn test_local_login_disabled_blocks_endpoints() {
         .unwrap();
     assert_eq!(reset_submit_res.status(), StatusCode::FORBIDDEN);
 }
+
+// ---------------------------------------------------------------------------
+// Separate file-serving domain
+// ---------------------------------------------------------------------------
+
+/// Builder for file rows, so each delivery test states only the attribute it is about.
+struct TestFile {
+    public_id: String,
+    filename: &'static str,
+    content_type: &'static str,
+    bytes: &'static [u8],
+    visibility: &'static str,
+    owner_user_id: Option<String>,
+    item_state: &'static str,
+    thumbnail: bool,
+    declared_size: Option<i64>,
+}
+
+impl TestFile {
+    fn new(public_id: &str) -> Self {
+        Self {
+            public_id: public_id.to_string(),
+            filename: "note.txt",
+            content_type: "text/plain",
+            bytes: b"file bytes",
+            visibility: "unlisted",
+            owner_user_id: None,
+            item_state: "active",
+            thumbnail: false,
+            declared_size: None,
+        }
+    }
+
+    /// Records a `size_bytes` that disagrees with the stored blob, the way a drifted row would.
+    fn declared_size(mut self, size_bytes: i64) -> Self {
+        self.declared_size = Some(size_bytes);
+        self
+    }
+
+    fn content(
+        mut self,
+        filename: &'static str,
+        content_type: &'static str,
+        bytes: &'static [u8],
+    ) -> Self {
+        self.filename = filename;
+        self.content_type = content_type;
+        self.bytes = bytes;
+        self
+    }
+
+    fn visibility(mut self, visibility: &'static str) -> Self {
+        self.visibility = visibility;
+        self
+    }
+
+    fn owner(mut self, user_id: &str) -> Self {
+        self.owner_user_id = Some(user_id.to_string());
+        self
+    }
+
+    fn item_state(mut self, item_state: &'static str) -> Self {
+        self.item_state = item_state;
+        self
+    }
+
+    fn with_thumbnail(mut self) -> Self {
+        self.thumbnail = true;
+        self
+    }
+
+    async fn create(self, state: &AppState) -> FileItem {
+        let bytes = Bytes::from_static(self.bytes);
+        let hash = util::sha256_hex_bytes(&bytes);
+        state
+            .db
+            .create_blob_if_missing(&hash, bytes.len() as i64, Some(self.content_type))
+            .await
+            .unwrap();
+        state.storage.put_blob(&hash, bytes.clone()).await.unwrap();
+        let thumbnail_hash = if self.thumbnail {
+            let thumbnail = Bytes::from_static(b"thumbnail bytes");
+            let thumbnail_hash = util::sha256_hex_bytes(&thumbnail);
+            state
+                .db
+                .create_blob_if_missing(&thumbnail_hash, thumbnail.len() as i64, Some("image/png"))
+                .await
+                .unwrap();
+            state
+                .storage
+                .put_blob(&thumbnail_hash, thumbnail)
+                .await
+                .unwrap();
+            Some(thumbnail_hash)
+        } else {
+            None
+        };
+        let extension = util::normalize_extension(Some(self.filename), Some(self.content_type));
+        state
+            .db
+            .create_file_item(NewFileItem {
+                id: &uuid::Uuid::new_v4().to_string(),
+                public_id: &self.public_id,
+                blob_hash: &hash,
+                original_filename: Some(self.filename),
+                extension: extension.as_deref(),
+                content_type: Some(self.content_type),
+                size_bytes: self.declared_size.unwrap_or(bytes.len() as i64),
+                image_width: None,
+                image_height: None,
+                owner_user_id: self.owner_user_id.as_deref(),
+                delete_token_hash: None,
+                expires_at: None,
+                visibility: self.visibility,
+                metadata_json: None,
+                thumbnail_hash: thumbnail_hash.as_deref(),
+                state: self.item_state,
+            })
+            .await
+            .unwrap()
+    }
+}
+
+async fn delivery_session(state: &AppState, email: &str, role: Role) -> (User, String) {
+    let user = state
+        .db
+        .create_user(email, email, Some("password-hash"), role)
+        .await
+        .unwrap();
+    let token = util::secret_token();
+    state
+        .db
+        .create_session(&user.id, &util::hash_token(&token), util::now_ts() + 3600)
+        .await
+        .unwrap();
+    (user, token)
+}
+
+fn delivery_request(uri: &str, host: &str, session: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().uri(uri).header(header::HOST, host);
+    if let Some(token) = session {
+        builder = builder.header(header::COOKIE, format!("midden_session={token}"));
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+/// Reads a rendered page with its HTML entities decoded, so URL assertions can be written the way
+/// a browser would follow them rather than the way minijinja escapes them.
+async fn response_markup(response: Response) -> String {
+    html_escape::decode_html_entities(&response_body(response).await).into_owned()
+}
+
+const APP_HOST: &str = "midden.example";
+const FILE_HOST: &str = "files.midden.example";
+
+#[tokio::test]
+async fn file_host_answers_only_the_routes_that_serve_file_bytes() {
+    let state = file_delivery_state().await;
+    TestFile::new("hostroute")
+        .content("photo.png", "image/png", b"\x89PNG\r\n\x1a\npixels")
+        .with_thumbnail()
+        .create(&state)
+        .await;
+    let router = state.router();
+
+    for uri in [
+        "/hostroute.png",
+        "/files/hostroute/raw",
+        "/files/hostroute/thumbnail",
+        "/robots.txt",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(delivery_request(uri, FILE_HOST, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri} on the file host");
+    }
+
+    for uri in [
+        "/",
+        "/browse",
+        "/url-upload",
+        "/register",
+        "/account",
+        "/admin",
+        "/admin/settings",
+        "/static/midden.css",
+        "/p/new",
+        "/api/v1/files",
+        "/api/docs",
+        "/readyz",
+        "/metrics",
+        "/internal/files/hostroute/raw",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(delivery_request(uri, FILE_HOST, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{uri} must not exist on the file host"
+        );
+    }
+}
+
+#[tokio::test]
+async fn file_host_serves_a_disallow_all_robots_txt() {
+    let state = file_delivery_state().await;
+    let mut features = state.settings().await.unwrap().features;
+    features.public_browse = true;
+    state
+        .db
+        .set_json_setting("features", &features)
+        .await
+        .unwrap();
+    let mut discovery = state.settings().await.unwrap().discovery;
+    discovery.robots_index = true;
+    state
+        .db
+        .set_json_setting("discovery", &discovery)
+        .await
+        .unwrap();
+    let router = state.router();
+
+    let on_app_host = router
+        .clone()
+        .oneshot(delivery_request("/robots.txt", APP_HOST, None))
+        .await
+        .unwrap();
+    assert_eq!(on_app_host.status(), StatusCode::OK);
+    assert!(response_body(on_app_host).await.contains("Allow: /browse"));
+
+    let on_file_host = router
+        .oneshot(delivery_request("/robots.txt", FILE_HOST, None))
+        .await
+        .unwrap();
+    assert_eq!(on_file_host.status(), StatusCode::OK);
+    assert_eq!(
+        response_body(on_file_host).await,
+        "User-agent: *\nDisallow: /\n"
+    );
+}
+
+/// A separate file domain never receives the session cookie, so anything that needs a session has
+/// to keep being served from the application origin.
+#[tokio::test]
+async fn files_that_need_a_session_stay_on_the_app_origin() {
+    let state = file_delivery_state().await;
+    let (owner, session) = delivery_session(&state, "owner@example.test", Role::User).await;
+    TestFile::new("privfile")
+        .visibility("private")
+        .owner(&owner.id)
+        .create(&state)
+        .await;
+    let router = state.router();
+
+    for uri in ["/privfile.txt", "/files/privfile/raw"] {
+        let owned = router
+            .clone()
+            .oneshot(delivery_request(uri, APP_HOST, Some(&session)))
+            .await
+            .unwrap();
+        assert_eq!(owned.status(), StatusCode::OK, "owner opening {uri}");
+
+        let anonymous = router
+            .clone()
+            .oneshot(delivery_request(uri, APP_HOST, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            anonymous.status(),
+            StatusCode::FORBIDDEN,
+            "anonymous opening {uri}"
+        );
+
+        let on_file_host = router
+            .clone()
+            .oneshot(delivery_request(uri, FILE_HOST, Some(&session)))
+            .await
+            .unwrap();
+        assert_eq!(
+            on_file_host.status(),
+            StatusCode::NOT_FOUND,
+            "{uri} must not be offered by the file host"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_restricted_view_policy_keeps_every_file_on_the_app_origin() {
+    let state = file_delivery_state().await;
+    let mut policy = state.settings().await.unwrap().policy;
+    policy.view_item = crate::config::ActionRule::Authenticated;
+    state.db.set_json_setting("policy", &policy).await.unwrap();
+    let (_user, session) = delivery_session(&state, "viewer@example.test", Role::User).await;
+    TestFile::new("policyfile").create(&state).await;
+    let router = state.router();
+
+    let signed_in = router
+        .clone()
+        .oneshot(delivery_request(
+            "/policyfile.txt",
+            APP_HOST,
+            Some(&session),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(signed_in.status(), StatusCode::OK);
+
+    let anonymous = router
+        .clone()
+        .oneshot(delivery_request("/policyfile.txt", APP_HOST, None))
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::FORBIDDEN);
+
+    let on_file_host = router
+        .oneshot(delivery_request(
+            "/policyfile.txt",
+            FILE_HOST,
+            Some(&session),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(on_file_host.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn generated_urls_point_at_the_origin_that_can_serve_them() {
+    let state = file_delivery_state().await;
+    let settings = state.settings().await.unwrap();
+    let public = TestFile::new("pubfile").create(&state).await;
+    let private = TestFile::new("secretfile")
+        .visibility("private")
+        .create(&state)
+        .await;
+
+    assert_eq!(
+        file_url(&state, &settings, &public),
+        "https://files.midden.example/pubfile.txt"
+    );
+    assert_eq!(
+        raw_file_url(&state, &settings, &public),
+        "https://files.midden.example/files/pubfile/raw"
+    );
+    assert_eq!(
+        thumbnail_file_url(&state, &settings, &public),
+        "https://files.midden.example/files/pubfile/thumbnail"
+    );
+
+    assert_eq!(
+        file_url(&state, &settings, &private),
+        "https://midden.example/secretfile.txt"
+    );
+    assert_eq!(
+        raw_file_url(&state, &settings, &private),
+        "https://midden.example/files/secretfile/raw"
+    );
+}
+
+#[tokio::test]
+async fn preview_pages_are_served_from_the_app_origin() {
+    let state = file_delivery_state().await;
+    let mut features = state.settings().await.unwrap().features;
+    features.preview_pages = true;
+    state
+        .db
+        .set_json_setting("features", &features)
+        .await
+        .unwrap();
+    TestFile::new("previewed")
+        .content("photo.png", "image/png", b"\x89PNG\r\n\x1a\npixels")
+        .create(&state)
+        .await;
+    let router = state.router();
+
+    let preview = router
+        .clone()
+        .oneshot(delivery_request("/previewed.png", APP_HOST, None))
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), StatusCode::OK);
+    let body = response_markup(preview).await;
+    // The page is app chrome, so its own assets resolve; the bytes it embeds come from the file
+    // origin, which is the only host that will serve them.
+    assert!(body.contains("/static/midden.css"));
+    assert!(body.contains("https://files.midden.example/files/previewed/raw"));
+
+    let on_file_host = router
+        .clone()
+        .oneshot(delivery_request("/previewed.png", FILE_HOST, None))
+        .await
+        .unwrap();
+    assert_eq!(on_file_host.status(), StatusCode::NOT_FOUND);
+
+    let bytes_on_file_host = router
+        .oneshot(delivery_request("/files/previewed/raw", FILE_HOST, None))
+        .await
+        .unwrap();
+    assert_eq!(bytes_on_file_host.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn listing_pages_link_files_on_the_origin_that_serves_them() {
+    let state = file_delivery_state().await;
+    let mut features = state.settings().await.unwrap().features;
+    features.public_browse = true;
+    features.reports = true;
+    state
+        .db
+        .set_json_setting("features", &features)
+        .await
+        .unwrap();
+    let (owner, owner_session) = delivery_session(&state, "lister@example.test", Role::User).await;
+    let (_moderator, moderator_session) =
+        delivery_session(&state, "mod@example.test", Role::Admin).await;
+    TestFile::new("listed")
+        .visibility("public")
+        .owner(&owner.id)
+        .create(&state)
+        .await;
+    let router = state.router();
+
+    for (uri, session) in [
+        ("/browse", None),
+        ("/account", Some(&owner_session)),
+        ("/admin/search?q=listed", Some(&moderator_session)),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(delivery_request(uri, APP_HOST, session.map(String::as_str)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "loading {uri}");
+        let body = response_markup(response).await;
+        assert!(
+            body.contains("https://files.midden.example/listed.txt"),
+            "{uri} should link the file on the file origin"
+        );
+        assert!(
+            !body.contains("href=\"/listed.txt\""),
+            "{uri} should not link the file on the app origin"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_report_queue_links_files_where_a_moderator_can_open_them() {
+    let state = file_delivery_state().await;
+    let (_moderator, session) = delivery_session(&state, "queue@example.test", Role::Admin).await;
+    TestFile::new("reported").create(&state).await;
+    state
+        .db
+        .create_report("file", "reported", None, "spam", "please look")
+        .await
+        .unwrap();
+    let router = state.router();
+
+    let queue = router
+        .clone()
+        .oneshot(delivery_request("/admin/reports", APP_HOST, Some(&session)))
+        .await
+        .unwrap();
+    assert_eq!(queue.status(), StatusCode::OK);
+    let body = response_markup(queue).await;
+    assert!(!body.contains("href=\"/reported\""));
+    assert!(body.contains("/admin/items/file/reported"));
+
+    let moderation_page = router
+        .oneshot(delivery_request(
+            "/admin/items/file/reported",
+            APP_HOST,
+            Some(&session),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(moderation_page.status(), StatusCode::OK);
+    assert!(
+        response_markup(moderation_page)
+            .await
+            .contains("https://files.midden.example/reported.txt")
+    );
+}
+
+#[tokio::test]
+async fn shared_origin_file_responses_carry_the_content_security_headers() {
+    let mut config = crate::config::AppConfig::default();
+    config.database.url = "sqlite::memory:".to_string();
+    config.database.max_connections = 1;
+    config.server.public_base_url = "https://midden.example".to_string();
+    config.storage.local.path =
+        std::env::temp_dir().join(format!("midden-shared-origin-{}", util::public_id()));
+    let state = AppState::new(config).await.unwrap();
+    state.db.migrate().await.unwrap();
+    TestFile::new("sharedfile")
+        .content("blob.bin", "application/octet-stream", b"\x00\x01hello")
+        .create(&state)
+        .await;
+
+    let response = state
+        .router()
+        .oneshot(delivery_request("/sharedfile.bin", APP_HOST, None))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+        "nosniff"
+    );
+    assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+    assert_eq!(
+        response.headers()["cross-origin-resource-policy"],
+        "cross-origin"
+    );
+    // The sandbox policy belongs to the isolated origin only; it would break embedding here.
+    assert!(
+        !response
+            .headers()
+            .contains_key(header::CONTENT_SECURITY_POLICY)
+    );
+}
+
+#[tokio::test]
+async fn unavailable_items_are_not_disclosed_to_viewers_who_could_not_see_them() {
+    let state = file_delivery_state().await;
+    let (owner, session) = delivery_session(&state, "holder@example.test", Role::User).await;
+    TestFile::new("heldfile")
+        .visibility("private")
+        .owner(&owner.id)
+        .item_state("takedown")
+        .create(&state)
+        .await;
+    let router = state.router();
+
+    let anonymous = router
+        .clone()
+        .oneshot(delivery_request("/heldfile.txt", APP_HOST, None))
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::NOT_FOUND);
+
+    let owned = router
+        .oneshot(delivery_request("/heldfile.txt", APP_HOST, Some(&session)))
+        .await
+        .unwrap();
+    assert_eq!(owned.status(), StatusCode::OK);
+    assert!(response_body(owned).await.contains("takedown"));
+}
+
+#[tokio::test]
+async fn files_needing_a_session_are_never_publicly_cached() {
+    let state = file_delivery_state().await;
+    let mut policy = state.settings().await.unwrap().policy;
+    policy.view_item = crate::config::ActionRule::Authenticated;
+    state.db.set_json_setting("policy", &policy).await.unwrap();
+    let (_user, session) = delivery_session(&state, "cache@example.test", Role::User).await;
+    TestFile::new("cachedfile").create(&state).await;
+
+    let response = state
+        .router()
+        .oneshot(delivery_request(
+            "/cachedfile.txt",
+            APP_HOST,
+            Some(&session),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "private, no-store"
+    );
+}
+
+/// The row's `size_bytes` is metadata; the object store knows the real length. A `Content-Length`
+/// taken from the row is one the body cannot satisfy, which clients see as a hung or truncated
+/// download rather than as an error.
+#[tokio::test]
+async fn responses_measure_the_stored_blob_rather_than_the_row() {
+    let state = file_delivery_state().await;
+    TestFile::new("driftfile")
+        .content("data.bin", "application/octet-stream", b"0123456789")
+        .declared_size(9_999)
+        .create(&state)
+        .await;
+    let router = state.router();
+
+    let full = router
+        .clone()
+        .oneshot(delivery_request("/driftfile.bin", FILE_HOST, None))
+        .await
+        .unwrap();
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(full.headers()[header::CONTENT_LENGTH], "10");
+    assert_eq!(response_body(full).await, "0123456789");
+
+    let ranged = router
+        .oneshot(
+            Request::builder()
+                .uri("/driftfile.bin")
+                .header(header::HOST, FILE_HOST)
+                .header(header::RANGE, "bytes=2-5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(ranged.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+    assert_eq!(ranged.headers()[header::CONTENT_LENGTH], "4");
+    assert_eq!(response_body(ranged).await, "2345");
+}

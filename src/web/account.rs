@@ -24,6 +24,7 @@ pub(super) async fn account(
     let oidc_link_enabled = oidc::enabled(&state, &settings);
     let q = query.q.unwrap_or_default();
     let (files, pastes) = user_items_for_query(&state, &settings, &user, &q).await?;
+    let files = linked_files(&state, &settings, &files)?;
     let page = if htmx_request(&headers) {
         serde_json::json!({
             "q": q,

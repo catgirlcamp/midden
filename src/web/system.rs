@@ -1,20 +1,33 @@
 use super::*;
 
-pub(super) async fn robots_txt(State(state): State<AppState>) -> AppResult<Response> {
+pub(super) async fn robots_txt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
     let settings = state.settings().await?;
-    let body = if settings.features.public_browse && settings.discovery.robots_index {
+    // The file origin serves nothing a crawler should index. Answering 404 there would read as
+    // permission to index everything, quietly dropping the `Disallow: /` the app origin serves and
+    // exposing unlisted files, whose only protection is an unguessable link.
+    let body = if settings.features.public_browse
+        && settings.discovery.robots_index
+        && !is_isolated_file_host(&settings, &headers)
+    {
         "User-agent: *\nAllow: /browse\n"
     } else {
         "User-agent: *\nDisallow: /\n"
     };
-    Ok((
+    Ok(plain_text(body))
+}
+
+fn plain_text(body: &'static str) -> Response {
+    (
         [(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         )],
         body,
     )
-        .into_response())
+        .into_response()
 }
 
 pub(super) async fn healthz() -> &'static str {

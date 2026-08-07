@@ -21,7 +21,7 @@
       {% for file in page.files %}
         <tr>
           <td data-label="Select"><input type="checkbox" name="file_ids" value="{{ file.public_id }}" aria-label="Select file {{ file.public_id }}"></td>
-          <td data-label="File"><a href="/{{ file.public_id }}{% if file.extension %}.{{ file.extension }}{% endif %}">{{ file.original_filename or file.public_id }}</a></td>
+          <td data-label="File"><a href="{{ file.url }}">{{ file.original_filename or file.public_id }}</a></td>
           <td data-label="Type">{{ file.content_type or "" }}</td>
           <td data-label="Size">{{ human_bytes(file.size_bytes) }}</td>
           <td data-label="Image">{% if file.image_width and file.image_height %}{{ file.image_width }}x{{ file.image_height }}{% endif %}</td>

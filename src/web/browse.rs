@@ -68,7 +68,7 @@ pub(super) async fn public_browse(
         user.as_ref(),
         serde_json::json!({
             "q": query.q.unwrap_or_default(),
-            "files": files,
+            "files": linked_files(&state, &settings, &files)?,
             "pastes": pastes,
             "older_url": older_url,
         }),

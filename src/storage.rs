@@ -17,6 +17,28 @@ pub struct BlobStorage {
     prefix: Option<String>,
 }
 
+/// A blob read, carrying the lengths the object store reported alongside the bytes.
+///
+/// Callers need both to describe the response honestly: `size` is the whole object and `range` is
+/// the part this stream covers.
+pub struct BlobStream {
+    pub size: u64,
+    pub range: std::ops::Range<u64>,
+    pub stream: BoxStream<'static, object_store::Result<Bytes>>,
+}
+
+impl BlobStream {
+    fn new(result: object_store::GetResult) -> Self {
+        let size = result.meta.size;
+        let range = result.range.clone();
+        Self {
+            size,
+            range,
+            stream: result.into_stream(),
+        }
+    }
+}
+
 impl BlobStorage {
     const STREAM_UPLOAD_BUFFER_BYTES: usize = 5 * 1024 * 1024;
 
@@ -95,27 +117,27 @@ impl BlobStorage {
             .await?)
     }
 
-    pub async fn get_blob_stream(
-        &self,
-        hash: &str,
-    ) -> anyhow::Result<BoxStream<'static, object_store::Result<Bytes>>> {
+    /// Size of a stored blob, as recorded by the object store rather than by our own metadata.
+    pub async fn blob_size(&self, hash: &str) -> anyhow::Result<u64> {
+        Ok(self.store.head(&self.object_path(hash)?).await?.size)
+    }
+
+    pub async fn get_blob_stream(&self, hash: &str) -> anyhow::Result<BlobStream> {
         let path = self.object_path(hash)?;
-        let get_result = self.store.get(&path).await?;
-        Ok(get_result.into_stream())
+        Ok(BlobStream::new(self.store.get(&path).await?))
     }
 
     pub async fn get_blob_range_stream(
         &self,
         hash: &str,
         range: GetRange,
-    ) -> anyhow::Result<BoxStream<'static, object_store::Result<Bytes>>> {
+    ) -> anyhow::Result<BlobStream> {
         let path = self.object_path(hash)?;
         let options = GetOptions {
             range: Some(range),
             ..Default::default()
         };
-        let get_result = self.store.get_opts(&path, options).await?;
-        Ok(get_result.into_stream())
+        Ok(BlobStream::new(self.store.get_opts(&path, options).await?))
     }
 
     pub async fn delete_blob(&self, hash: &str) -> anyhow::Result<()> {

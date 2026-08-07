@@ -35,9 +35,35 @@ pub(super) fn file_base_url(state: &AppState, settings: &RuntimeSettings) -> Str
         .to_string()
 }
 
+/// Whether viewing this file requires a signed-in caller.
+///
+/// A separate file domain is a separate origin, so the browser never sends it the session cookie
+/// and no request arriving there can be authorised. Anything that needs a session therefore has to
+/// stay on the application origin.
+pub(super) fn file_needs_app_origin(settings: &RuntimeSettings, file: &FileItem) -> bool {
+    file.visibility == "private" || !matches!(settings.policy.view_item, ActionRule::Anonymous)
+}
+
+/// The origin that is actually able to serve this file's bytes.
+pub(super) fn file_origin(state: &AppState, settings: &RuntimeSettings, file: &FileItem) -> String {
+    if file_needs_app_origin(settings, file) {
+        app_base_url(state)
+    } else {
+        file_base_url(state, settings)
+    }
+}
+
+/// The canonical link for a file: the preview page when there is one, the bytes otherwise.
 pub(super) fn file_url(state: &AppState, settings: &RuntimeSettings, file: &FileItem) -> String {
     let slug = util::slug_with_extension(&file.public_id, file.extension.as_deref());
-    format!("{}/{}", file_base_url(state, settings), slug)
+    // A preview page is application chrome, not file content, so it belongs on the app origin
+    // where its stylesheet, scripts and session are reachable.
+    let base = if settings.features.preview_pages {
+        app_base_url(state)
+    } else {
+        file_origin(state, settings, file)
+    };
+    format!("{base}/{slug}")
 }
 
 pub(super) fn raw_file_url(
@@ -47,7 +73,7 @@ pub(super) fn raw_file_url(
 ) -> String {
     format!(
         "{}/files/{}/raw",
-        file_base_url(state, settings),
+        file_origin(state, settings, file),
         file.public_id
     )
 }
@@ -59,40 +85,130 @@ pub(super) fn thumbnail_file_url(
 ) -> String {
     format!(
         "{}/files/{}/thumbnail",
-        file_base_url(state, settings),
+        file_origin(state, settings, file),
         file.public_id
     )
 }
 
-pub(super) fn configured_file_host(settings: &RuntimeSettings) -> Option<String> {
-    let url = settings.delivery.public_file_base_url.as_deref()?;
-    let parsed = url::Url::parse(url).ok()?;
-    let host = parsed.host_str()?.to_ascii_lowercase();
-    match parsed.port() {
-        Some(port) => Some(format!("{host}:{port}")),
-        None => Some(host),
+/// Serialises files for templates together with the URL each one should be linked by.
+///
+/// Templates cannot build these paths themselves: which origin serves a file depends on the
+/// delivery settings and on the file's own visibility, so a relative link silently breaks as soon
+/// as files move to their own domain.
+pub(super) fn linked_files(
+    state: &AppState,
+    settings: &RuntimeSettings,
+    files: &[FileItem],
+) -> AppResult<Vec<serde_json::Value>> {
+    files
+        .iter()
+        .map(|file| {
+            let mut value = serde_json::to_value(file).map_err(|err| {
+                AppError::Other(anyhow::anyhow!("failed to serialise file: {err}"))
+            })?;
+            if let Some(object) = value.as_object_mut() {
+                object.insert("url".to_string(), file_url(state, settings, file).into());
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
+/// The host and port a request was addressed to, normalised for comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestOrigin {
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+impl RequestOrigin {
+    /// Resolves the origin from the URI authority first and the `Host` header second.
+    ///
+    /// HTTP/2 has no `Host` header — the authority arrives as the `:authority` pseudo-header,
+    /// which hyper puts on the URI. Reading only the header map takes the file origin offline for
+    /// any deployment whose proxy speaks h2c upstream.
+    pub(super) fn from_request(uri: &Uri, headers: &HeaderMap) -> Option<Self> {
+        if let Some(authority) = uri.authority() {
+            return Some(Self {
+                host: normalize_host(authority.host()),
+                port: authority.port_u16(),
+            });
+        }
+        Self::parse(headers.get(header::HOST)?.to_str().ok()?)
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        if let Some((host, rest)) = value
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once(']'))
+        {
+            return Some(Self {
+                host: format!("[{}]", normalize_host(host)),
+                port: parse_authority_port(rest)?,
+            });
+        }
+        match value.rsplit_once(':') {
+            Some(("", _)) => None,
+            Some((host, port)) => Some(Self {
+                host: normalize_host(host),
+                port: Some(port.parse().ok()?),
+            }),
+            None => Some(Self {
+                host: normalize_host(value),
+                port: None,
+            }),
+        }
     }
 }
 
-pub(super) fn request_host(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().trim_end_matches('.').to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
+/// Hostnames are case-insensitive and may carry the root label's trailing dot.
+fn normalize_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
 }
 
-pub(super) fn is_isolated_file_host(settings: &RuntimeSettings, headers: &HeaderMap) -> bool {
+/// Reads the `:port` tail of an authority, where an absent port is valid and a malformed one is not.
+fn parse_authority_port(rest: &str) -> Option<Option<u16>> {
+    if rest.is_empty() {
+        return Some(None);
+    }
+    Some(Some(rest.strip_prefix(':')?.parse().ok()?))
+}
+
+pub(super) fn configured_file_origin(settings: &RuntimeSettings) -> Option<RequestOrigin> {
+    let url = settings.delivery.public_file_base_url.as_deref()?;
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    Some(RequestOrigin {
+        host: normalize_host(parsed.host_str()?),
+        port: parsed.port_or_known_default(),
+    })
+}
+
+pub(super) fn matches_file_host(
+    settings: &RuntimeSettings,
+    origin: Option<&RequestOrigin>,
+) -> bool {
     if !settings.delivery.isolated_file_origin {
         return false;
     }
-    let Some(configured) = configured_file_host(settings) else {
+    let (Some(configured), Some(origin)) = (configured_file_origin(settings), origin) else {
         return false;
     };
-    let Some(request) = request_host(headers) else {
-        return false;
-    };
-    configured == request
+    // Proxies disagree about whether to forward the scheme's default port, so an absent port
+    // matches whatever was configured. Only a port that was forwarded *and* differs is a mismatch.
+    configured.host == origin.host && origin.port.is_none_or(|port| Some(port) == configured.port)
+}
+
+pub(super) fn is_isolated_file_host(settings: &RuntimeSettings, headers: &HeaderMap) -> bool {
+    let origin = REQUEST_CONTEXT
+        .try_with(|ctx| ctx.request_origin.clone())
+        .ok()
+        .flatten()
+        .or_else(|| RequestOrigin::from_request(&Uri::default(), headers));
+    matches_file_host(settings, origin.as_ref())
 }
 
 pub(super) fn signed_internal_raw_url(
@@ -316,6 +432,127 @@ fn request_peer_ip() -> Option<IpAddr> {
 mod tests {
     use super::*;
     use crate::config::ServerConfig;
+
+    fn isolated(file_base_url: &str) -> RuntimeSettings {
+        let mut settings = RuntimeSettings::from_config(&crate::config::AppConfig::default());
+        settings.delivery.public_file_base_url = Some(file_base_url.to_string());
+        settings.delivery.isolated_file_origin = true;
+        settings
+    }
+
+    fn origin(value: &str) -> Option<RequestOrigin> {
+        RequestOrigin::parse(value)
+    }
+
+    #[test]
+    fn file_host_matching_ignores_case_and_a_trailing_root_dot() {
+        let settings = isolated("https://files.example.test");
+        assert!(matches_file_host(
+            &settings,
+            origin("Files.Example.Test").as_ref()
+        ));
+        assert!(matches_file_host(
+            &settings,
+            origin("files.example.test.").as_ref()
+        ));
+        assert!(!matches_file_host(
+            &settings,
+            origin("app.example.test").as_ref()
+        ));
+    }
+
+    /// Some proxies forward the scheme's default port in `Host`. Rejecting that would take every
+    /// file route offline, so an explicit default port has to compare equal to an implicit one.
+    #[test]
+    fn file_host_matching_accepts_an_explicit_default_port() {
+        assert!(matches_file_host(
+            &isolated("https://files.example.test"),
+            origin("files.example.test:443").as_ref()
+        ));
+        assert!(matches_file_host(
+            &isolated("http://files.example.test"),
+            origin("files.example.test:80").as_ref()
+        ));
+        assert!(matches_file_host(
+            &isolated("http://localhost:8080"),
+            origin("localhost:8080").as_ref()
+        ));
+    }
+
+    #[test]
+    fn file_host_matching_rejects_a_different_port() {
+        assert!(!matches_file_host(
+            &isolated("https://files.example.test"),
+            origin("files.example.test:8443").as_ref()
+        ));
+        assert!(!matches_file_host(
+            &isolated("http://localhost:8080"),
+            origin("localhost:9090").as_ref()
+        ));
+    }
+
+    #[test]
+    fn file_host_matching_is_off_without_the_isolation_flag_or_a_base_url() {
+        let mut settings = isolated("https://files.example.test");
+        settings.delivery.isolated_file_origin = false;
+        assert!(!matches_file_host(
+            &settings,
+            origin("files.example.test").as_ref()
+        ));
+
+        let mut settings = isolated("https://files.example.test");
+        settings.delivery.public_file_base_url = None;
+        assert!(!matches_file_host(
+            &settings,
+            origin("files.example.test").as_ref()
+        ));
+        assert!(!matches_file_host(
+            &isolated("https://files.example.test"),
+            None
+        ));
+    }
+
+    /// HTTP/2 carries the authority as a pseudo-header rather than `Host`, so hyper surfaces it on
+    /// the URI. Reading only the header map would take the file origin offline over h2c.
+    #[test]
+    fn request_origin_prefers_the_uri_authority_and_falls_back_to_the_host_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("app.example.test"));
+
+        let from_uri = RequestOrigin::from_request(
+            &"https://files.example.test/abc.png".parse().unwrap(),
+            &headers,
+        );
+        assert_eq!(from_uri, origin("files.example.test"));
+
+        let from_header = RequestOrigin::from_request(&"/abc.png".parse().unwrap(), &headers);
+        assert_eq!(from_header, origin("app.example.test"));
+
+        assert_eq!(
+            RequestOrigin::from_request(&"/abc.png".parse().unwrap(), &HeaderMap::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn request_origin_parses_ipv6_literals_and_rejects_junk() {
+        assert_eq!(
+            origin("[2001:db8::5]:8080"),
+            Some(RequestOrigin {
+                host: "[2001:db8::5]".to_string(),
+                port: Some(8080)
+            })
+        );
+        assert_eq!(
+            origin("[2001:db8::5]"),
+            Some(RequestOrigin {
+                host: "[2001:db8::5]".to_string(),
+                port: None
+            })
+        );
+        assert_eq!(origin(""), None);
+        assert_eq!(origin("files.example.test:not-a-port"), None);
+    }
 
     fn proxied(hops: usize) -> ServerConfig {
         ServerConfig {

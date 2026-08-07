@@ -155,7 +155,9 @@ pub(super) async fn file_slug(
         return Err(AppError::NotFound);
     };
     let settings = state.settings().await?;
-    if settings.delivery.isolated_file_origin && !is_isolated_file_host(&settings, &headers) {
+    let isolated_file_host = is_isolated_file_host(&settings, &headers);
+    // A preview page is application chrome, so it only exists on the application origin.
+    if settings.features.preview_pages && isolated_file_host {
         return Err(AppError::NotFound);
     }
     let user = current_user(&state, &jar).await?;
@@ -167,6 +169,15 @@ pub(super) async fn file_slug(
                 .file_by_public_id(public_id)
                 .await
                 .map_err(|_| AppError::NotFound)?;
+            // Whether an item exists, and what it was taken down for, is only the viewer's
+            // business if they could have viewed it in the first place.
+            authorize_item_view(
+                &settings,
+                user.as_ref(),
+                existing.owner_user_id.as_deref(),
+                &existing.visibility,
+            )
+            .map_err(|_| AppError::NotFound)?;
             return render_unavailable_item(
                 &state,
                 &settings,
@@ -178,6 +189,9 @@ pub(super) async fn file_slug(
             .map(IntoResponse::into_response);
         }
     };
+    if !settings.features.preview_pages {
+        enforce_file_origin(&settings, isolated_file_host, &file)?;
+    }
     authorize_item_view(
         &settings,
         user.as_ref(),
@@ -186,18 +200,48 @@ pub(super) async fn file_slug(
     )?;
     if settings.features.preview_pages {
         let preview = file_preview_context(&state, &file).await?;
+        let raw_url = raw_file_url(&state, &settings, &file);
         let page = serde_json::json!({
             "file": file,
-            "raw_url": format!("/files/{}/raw", public_id),
             "absolute_url": file_url(&state, &settings, &file),
-            "absolute_raw_url": raw_file_url(&state, &settings, &file),
+            // The preview embeds and links the bytes by absolute URL: under an isolated origin the
+            // application host does not serve them at all.
+            "raw_url": raw_url,
+            "absolute_raw_url": raw_url,
             "human_size": util::human_bytes(file.size_bytes),
             "preview": preview,
         });
         Ok(render(&state, "file_preview.html", &settings, user.as_ref(), page)?.into_response())
     } else {
-        let cache_scope = file_cache_scope(&file);
+        let cache_scope = file_cache_scope(&settings, &file);
         serve_file(&state, &settings, &headers, file, cache_scope).await
+    }
+}
+
+/// Enforces which origin may serve a file's bytes.
+///
+/// With an isolated file origin, public bytes are only available through the file host so that
+/// user-controlled content never shares the application origin. Files that need a session are the
+/// exception in both directions: the file host cannot authorise them, so they stay on the
+/// application origin rather than becoming unreachable from either host.
+fn enforce_file_origin(
+    settings: &RuntimeSettings,
+    isolated_file_host: bool,
+    file: &FileItem,
+) -> AppResult<()> {
+    if !settings.delivery.isolated_file_origin {
+        return Ok(());
+    }
+    if file_needs_app_origin(settings, file) {
+        if isolated_file_host {
+            return Err(AppError::NotFound);
+        }
+        return Ok(());
+    }
+    if isolated_file_host {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
     }
 }
 
@@ -251,22 +295,20 @@ pub(super) async fn raw_file(
     Path(id): Path<String>,
 ) -> AppResult<Response> {
     let settings = state.settings().await?;
-    if settings.delivery.isolated_file_origin && !is_isolated_file_host(&settings, &headers) {
-        return Err(AppError::NotFound);
-    }
     let user = current_user(&state, &jar).await?;
     let file = state
         .db
         .active_file_by_public_id(&id)
         .await?
         .ok_or(AppError::NotFound)?;
+    enforce_file_origin(&settings, is_isolated_file_host(&settings, &headers), &file)?;
     authorize_item_view(
         &settings,
         user.as_ref(),
         file.owner_user_id.as_deref(),
         &file.visibility,
     )?;
-    let cache_scope = file_cache_scope(&file);
+    let cache_scope = file_cache_scope(&settings, &file);
     serve_file(&state, &settings, &headers, file, cache_scope).await
 }
 
@@ -277,16 +319,15 @@ pub(super) async fn thumbnail_file(
     Path(id): Path<String>,
 ) -> AppResult<Response> {
     let settings = state.settings().await?;
-    // Thumbnails are file content and must follow the same origin rules as the raw bytes.
-    if settings.delivery.isolated_file_origin && !is_isolated_file_host(&settings, &headers) {
-        return Err(AppError::NotFound);
-    }
     let user = current_user(&state, &jar).await?;
     let file = state
         .db
         .active_file_by_public_id(&id)
         .await?
         .ok_or(AppError::NotFound)?;
+    // Thumbnails are file content and must follow the same origin rules as the raw bytes.
+    let isolated_file_host = is_isolated_file_host(&settings, &headers);
+    enforce_file_origin(&settings, isolated_file_host, &file)?;
     authorize_item_view(
         &settings,
         user.as_ref(),
@@ -299,11 +340,11 @@ pub(super) async fn thumbnail_file(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
-    insert_file_security_headers(&mut response, is_isolated_file_host(&settings, &headers));
+    insert_file_security_headers(&mut response, isolated_file_host);
     insert_cache_control(
         &mut response,
         settings.delivery.public_cache_seconds,
-        file_cache_scope(&file),
+        file_cache_scope(&settings, &file),
     );
     Ok(response)
 }
@@ -355,70 +396,35 @@ async fn serve_file(
     use futures_util::StreamExt;
     use headers::HeaderMapExt;
 
-    let total_len = file.size_bytes.max(0) as u64;
-    let mut is_partial = false;
-    let mut content_range_val = None;
-    let mut content_length_val = total_len;
-
-    let body = if total_len > 0 {
-        if let Some(range_header) = headers.typed_get::<headers::Range>() {
-            let ranges: Vec<_> = range_header.satisfiable_ranges(total_len).collect();
-            if ranges.is_empty() {
-                let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
-                response.headers_mut().insert(
-                    header::CONTENT_RANGE,
-                    HeaderValue::from_str(&format!("bytes */{total_len}")).unwrap(),
-                );
-                return Ok(response);
-            }
-            let (start_bound, end_bound) = ranges[0];
-            let start = match start_bound {
-                std::ops::Bound::Included(n) => n,
-                std::ops::Bound::Excluded(n) => n.saturating_add(1),
-                std::ops::Bound::Unbounded => 0,
+    // `file.size_bytes` is metadata and can drift from what was actually stored. Range arithmetic
+    // and `Content-Length` have to describe the bytes the response will really carry, so both come
+    // from the object store instead.
+    let blob = match headers.typed_get::<headers::Range>() {
+        Some(requested) => {
+            let total_len = state.storage.blob_size(&file.blob_hash).await?;
+            let Some(range) = first_satisfiable_range(&requested, total_len) else {
+                return Ok(range_not_satisfiable(total_len));
             };
-            let end = match end_bound {
-                std::ops::Bound::Included(n) => n,
-                std::ops::Bound::Excluded(n) => n.saturating_sub(1),
-                std::ops::Bound::Unbounded => total_len.saturating_sub(1),
-            };
-
-            if start <= end && end < total_len {
-                is_partial = true;
-                content_length_val = end - start + 1;
-                content_range_val = Some(format!("bytes {start}-{end}/{total_len}"));
-
-                let range_opt = object_store::GetRange::Bounded(start..(end + 1));
-                let stream = state
-                    .storage
-                    .get_blob_range_stream(&file.blob_hash, range_opt)
-                    .await?
-                    .map(|res| res.map_err(axum::Error::new));
-                axum::body::Body::from_stream(stream)
-            } else {
-                let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
-                response.headers_mut().insert(
-                    header::CONTENT_RANGE,
-                    HeaderValue::from_str(&format!("bytes */{total_len}")).unwrap(),
-                );
-                return Ok(response);
-            }
-        } else {
-            let stream = state
+            state
                 .storage
-                .get_blob_stream(&file.blob_hash)
+                .get_blob_range_stream(&file.blob_hash, object_store::GetRange::Bounded(range))
                 .await?
-                .map(|res| res.map_err(axum::Error::new));
-            axum::body::Body::from_stream(stream)
         }
-    } else {
-        let stream = state
-            .storage
-            .get_blob_stream(&file.blob_hash)
-            .await?
-            .map(|res| res.map_err(axum::Error::new));
-        axum::body::Body::from_stream(stream)
+        None => state.storage.get_blob_stream(&file.blob_hash).await?,
     };
+
+    let is_partial = blob.range.start != 0 || blob.range.end != blob.size;
+    let content_length_val = blob.range.end.saturating_sub(blob.range.start);
+    let content_range_val = is_partial.then(|| {
+        format!(
+            "bytes {}-{}/{}",
+            blob.range.start,
+            blob.range.end.saturating_sub(1),
+            blob.size
+        )
+    });
+    let body =
+        axum::body::Body::from_stream(blob.stream.map(|result| result.map_err(axum::Error::new)));
 
     let stored_content_type = file
         .content_type
@@ -470,9 +476,9 @@ async fn serve_file(
             .headers_mut()
             .insert(header::CONTENT_DISPOSITION, value);
     }
-    if plaintext || isolated_file_host {
-        insert_file_security_headers(&mut response, isolated_file_host);
-    }
+    // Every response here is user-controlled content, so it always gets the sniffing and referrer
+    // protections. Only the sandbox policy is specific to the isolated origin.
+    insert_file_security_headers(&mut response, isolated_file_host);
     insert_cache_control(
         &mut response,
         settings.delivery.public_cache_seconds,
@@ -482,8 +488,36 @@ async fn serve_file(
     Ok(response)
 }
 
-fn file_cache_scope(file: &FileItem) -> CacheScope {
-    if file.visibility == "private" {
+/// Resolves the first range the client asked for that the object can actually satisfy.
+fn first_satisfiable_range(
+    requested: &headers::Range,
+    total_len: u64,
+) -> Option<std::ops::Range<u64>> {
+    let (start_bound, end_bound) = requested.satisfiable_ranges(total_len).next()?;
+    let start = match start_bound {
+        std::ops::Bound::Included(n) => n,
+        std::ops::Bound::Excluded(n) => n.saturating_add(1),
+        std::ops::Bound::Unbounded => 0,
+    };
+    let end = match end_bound {
+        std::ops::Bound::Included(n) => n,
+        std::ops::Bound::Excluded(n) => n.saturating_sub(1),
+        std::ops::Bound::Unbounded => total_len.saturating_sub(1),
+    };
+    (start <= end && end < total_len).then(|| start..end + 1)
+}
+
+fn range_not_satisfiable(total_len: u64) -> Response {
+    let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+    if let Ok(value) = HeaderValue::from_str(&format!("bytes */{total_len}")) {
+        response.headers_mut().insert(header::CONTENT_RANGE, value);
+    }
+    response
+}
+
+/// A response a shared cache may keep has to be one that any caller was entitled to.
+fn file_cache_scope(settings: &RuntimeSettings, file: &FileItem) -> CacheScope {
+    if file_needs_app_origin(settings, file) {
         CacheScope::Private
     } else {
         CacheScope::Public

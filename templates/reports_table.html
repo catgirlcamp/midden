@@ -33,14 +33,11 @@
           <td data-label="Select"><label><input form="bulk-reports" type="checkbox" name="report_ids" value="{{ report.id }}" x-model="selected" aria-label="Select report {{ loop.index }}"> Report {{ loop.index }}</label></td>
           <td data-label="Item">
             {{ report.item_kind }}
-            {% if report.item_kind == "file" %}
-              <a href="/{{ report.item_public_id }}">{{ report.item_public_id }}</a>
-            {% elif report.item_kind == "paste" %}
-              <a href="/p/{{ report.item_public_id }}">{{ report.item_public_id }}</a>
+            {% if report.item_kind == "file" or report.item_kind == "paste" %}
+              <a href="/admin/items/{{ report.item_kind }}/{{ report.item_public_id }}">{{ report.item_public_id }}</a>
             {% else %}
               {{ report.item_public_id }}
             {% endif %}
-            <br><a href="/admin/items/{{ report.item_kind }}/{{ report.item_public_id }}">moderate</a>
           </td>
           <td data-label="Reason">{{ report.reason }}</td>
           <td data-label="State"><span class="status-badge status-badge--{{ report.state }}">{{ report.state }}</span></td>
