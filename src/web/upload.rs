@@ -417,11 +417,24 @@ fn resolved_content_type(settings: &RuntimeSettings, uploaded: &UploadedFile) ->
         }
     }
 
-    let specific_sniffed = sniffed.filter(|mime| mime != "application/octet-stream");
+    let specific_sniffed = sniffed
+        .clone()
+        .filter(|mime| !is_generic_mime(mime.as_str()));
     Ok(specific_sniffed
         .or(declared)
         .or(extension_guess)
+        .or(sniffed)
         .unwrap_or_else(|| "application/octet-stream".to_string()))
+}
+
+/// Whether a sniff result means "no idea" rather than a named format.
+///
+/// `sniff_mime` matches magic bytes and otherwise reports `text/plain` for printable input and
+/// `application/octet-stream` for everything else. Neither says anything about SVG, JSON, CSS, JS
+/// or most HTML, so neither may override what the upload declared: the stored type is what
+/// `forced_attachment_mime_types` and `risky_mime_mode` are matched against.
+fn is_generic_mime(value: &str) -> bool {
+    matches!(value, "application/octet-stream" | "text/plain")
 }
 
 fn clean_mime(value: &str) -> Option<String> {
@@ -432,7 +445,7 @@ fn clean_mime(value: &str) -> Option<String> {
 }
 
 fn reject_mime_mismatch(sniffed: &str, candidate: &str, source: &str) -> AppResult<()> {
-    if candidate == "application/octet-stream" || sniffed == "application/octet-stream" {
+    if is_generic_mime(candidate) || is_generic_mime(sniffed) {
         return Ok(());
     }
     if sniffed != candidate {
@@ -1047,6 +1060,98 @@ mod tests {
             resolved_content_type(&settings(), &uploaded).unwrap(),
             "image/webp"
         );
+    }
+
+    /// `sniff_mime` only knows magic bytes, so every text-based format it cannot name comes back
+    /// as `text/plain`. Letting that win would rewrite SVG, JSON, CSS and JS uploads to plain text
+    /// and take `forced_attachment_mime_types` out of play, since that list matches on the type
+    /// that was stored.
+    #[test]
+    fn declared_text_formats_survive_a_generic_text_sniff() {
+        for (filename, declared, bytes, expected) in [
+            (
+                "logo.svg",
+                Some("image/svg+xml"),
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".as_slice(),
+                "image/svg+xml",
+            ),
+            (
+                "page.html",
+                Some("text/html"),
+                b"<img src=x onerror=alert(1)>".as_slice(),
+                "text/html",
+            ),
+            (
+                "app.js",
+                Some("application/javascript"),
+                b"console.log(1);".as_slice(),
+                "application/javascript",
+            ),
+            (
+                "data.json",
+                None,
+                b"{\"a\":1}".as_slice(),
+                "application/json",
+            ),
+            ("style.css", None, b"body{color:red}".as_slice(), "text/css"),
+        ] {
+            let uploaded = UploadedFile::from_bytes(
+                Bytes::copy_from_slice(bytes),
+                Some(filename.to_string()),
+                declared.map(ToOwned::to_owned),
+            );
+            assert_eq!(
+                resolved_content_type(&settings(), &uploaded).unwrap(),
+                expected,
+                "{filename}"
+            );
+        }
+    }
+
+    /// Plain text stays plain text when nothing more specific is on offer.
+    #[test]
+    fn resolved_content_type_falls_back_to_the_generic_text_sniff() {
+        let uploaded = UploadedFile::from_bytes(
+            Bytes::from_static(b"just some words"),
+            Some("notes".to_string()),
+            None,
+        );
+
+        assert_eq!(
+            resolved_content_type(&settings(), &uploaded).unwrap(),
+            "text/plain"
+        );
+    }
+
+    /// A generic sniff is an absence of evidence, not evidence of a mismatch. Treating it as one
+    /// rejects every SVG, JSON, CSS and JS upload the moment the setting is turned on.
+    #[test]
+    fn mime_mismatch_rejection_ignores_generic_sniff_results() {
+        let mut settings = settings();
+        settings.security.reject_mime_mismatch = true;
+        let uploaded = UploadedFile::from_bytes(
+            Bytes::from_static(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"),
+            Some("logo.svg".to_string()),
+            Some("image/svg+xml".to_string()),
+        );
+
+        assert_eq!(
+            resolved_content_type(&settings, &uploaded).unwrap(),
+            "image/svg+xml"
+        );
+    }
+
+    #[test]
+    fn mime_mismatch_rejection_still_catches_a_named_disagreement() {
+        let mut settings = settings();
+        settings.security.reject_mime_mismatch = true;
+        let uploaded = UploadedFile::from_bytes(
+            Bytes::from_static(b"\x89PNG\r\n\x1a\npixels"),
+            Some("clip.mp4".to_string()),
+            Some("video/mp4".to_string()),
+        );
+
+        assert!(resolved_content_type(&settings, &uploaded).is_err());
     }
 
     #[tokio::test]
