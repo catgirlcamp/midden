@@ -13,6 +13,7 @@ Common causes:
 - Explicit `--config` path does not exist.
 - Invalid enum values such as an unknown action rule or delete policy.
 - `delivery.isolated_file_origin = true` without `delivery.public_file_base_url`.
+- `delivery.public_file_base_url` carrying a path rather than a bare scheme and host.
 - `delivery.signed_internal_urls = true` without `delivery.internal_url_secret`.
 - S3 backend selected without `storage.s3.bucket`.
 

@@ -14,6 +14,8 @@ public_file_base_url = "https://cdn-files.example.test"
 
 `server.public_base_url` is the application origin. `delivery.public_file_base_url`, when set, is used for file URLs and can point at a separate file domain or CDN.
 
+`delivery.public_file_base_url` must be a scheme and host only. Files are served from the root of their host, so a base URL carrying a path would hand out links nothing can answer.
+
 ## Cache Settings
 
 ```toml
@@ -33,6 +35,17 @@ public_file_base_url = "https://files-cdn.example.test"
 ```
 
 When isolated file origin is enabled, public file routes are only available through the configured file host. This reduces the risk of user-controlled file content sharing the main application origin.
+
+The file host is matched on the request's host, taken from the HTTP/2 authority or the `Host` header. A forwarded port only has to match when the proxy sends one, so `Host: files.example.test:443` still matches `https://files.example.test`.
+
+Two kinds of request stay on the application origin even when isolation is on, because the file host cannot serve them:
+
+- **Anything that needs a session.** A separate domain is a separate origin, so the browser never sends it the session cookie. Files with `private` visibility — and every file, if `policy.view_item` is stricter than `anonymous` — keep being served from the application origin. Their responses are marked `private, no-store` so a shared cache cannot hold them.
+- **Preview pages.** With `features.preview_pages = true` the slug URL is an application page rather than file content, so it is served from the application origin and embeds the bytes by absolute URL on the file host.
+
+Midden resolves every file link server-side, so browse, account, moderation search and the moderation pages all point at whichever origin can actually serve that file.
+
+The file host serves its own `robots.txt` containing `Disallow: /`, regardless of `discovery.robots_index`. Without it, crawlers would read the 404 as permission to index every file URL.
 
 ## Signed Internal URLs
 

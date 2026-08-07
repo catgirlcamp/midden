@@ -50,6 +50,10 @@ max_filename_bytes = 180
 
 If `allowed_mime_types` is empty, all MIME types are accepted unless blocked by scanner settings. Forced attachment types are served as downloads to reduce browser execution risk.
 
+These lists match the type Midden stored for the upload. Content sniffing only overrides the declared type when it recognises a specific format: it reports `text/plain` for any text it cannot name, and `application/octet-stream` for any binary, so neither result displaces what the upload declared or what its filename implies. Without that, an uploaded SVG or script would be stored as `text/plain` and never match its entry above.
+
+File responses always carry `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Cross-Origin-Resource-Policy: cross-origin`, on the isolated file origin and the application origin alike. The sandboxing `Content-Security-Policy` is added only on the isolated origin, where nothing needs to embed the response.
+
 `risky_mime_mode` accepts:
 
 - `attachment`: serve risky types as attachments.
@@ -63,7 +67,7 @@ If `allowed_mime_types` is empty, all MIME types are accepted unless blocked by 
 reject_mime_mismatch = true
 ```
 
-When enabled, Midden rejects uploads where sniffed content conflicts with the declared or filename-derived MIME type.
+When enabled, Midden rejects uploads where sniffed content conflicts with the declared or filename-derived MIME type. A sniff that lands on `text/plain` or `application/octet-stream` is an absence of evidence rather than a conflict, so it never triggers a rejection — otherwise every SVG, JSON, CSS and JavaScript upload would be refused.
 
 ## URL Upload Restrictions
 

@@ -124,7 +124,10 @@ max_filename_bytes = 180
 [delivery]
 public_cache_seconds = 3600
 static_cache_seconds = 31536000
+# Scheme and host only: files are served from the root of their host.
 # public_file_base_url = "https://files.example.test"
+# Serves public file bytes only through the host above. Files that need a session stay on the
+# application origin, which is the only origin the browser sends the session cookie to.
 isolated_file_origin = false
 signed_internal_urls = false
 # internal_url_secret = "change-me-long-random-secret"

@@ -40,6 +40,8 @@ These replaced a single `before` parameter. A stale link using it is ignored and
 
 When `features.preview_pages = true`, file links open a preview page first. Otherwise, file links serve the raw file directly.
 
+A preview page is part of the application, so it is always served from the application origin even when files have their own domain. The bytes it links and embeds come from the file domain.
+
 ## URL Upload
 
 When `features.upload_by_url = true`, `/url-upload` lets users fetch a remote `http` or `https` URL into Midden. Operators can restrict hosts, ports, redirects, response size, and private IP access.
