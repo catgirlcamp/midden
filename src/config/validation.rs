@@ -144,7 +144,7 @@ pub(super) fn validate(config: &AppConfig) -> anyhow::Result<()> {
         anyhow::bail!("isolated file origin requires a public file base URL");
     }
     if let Some(url) = nonempty_option(&config.delivery.public_file_base_url) {
-        validate_base_url("delivery.public_file_base_url", url)?;
+        validate_origin_url("delivery.public_file_base_url", url)?;
     }
     if config.delivery.signed_internal_urls
         && nonempty_option(&config.delivery.internal_url_secret).is_none()
@@ -280,10 +280,22 @@ fn validate_http_url(label: &str, value: &str) -> anyhow::Result<url::Url> {
     Ok(parsed)
 }
 
-fn validate_base_url(label: &str, value: &str) -> anyhow::Result<()> {
+fn validate_base_url(label: &str, value: &str) -> anyhow::Result<url::Url> {
     let parsed = validate_http_url(label, value)?;
     if parsed.query().is_some() || parsed.fragment().is_some() {
         anyhow::bail!("{label} must not contain a query string or fragment");
+    }
+    Ok(parsed)
+}
+
+/// Like [`validate_base_url`], but also rejects a path.
+///
+/// Files are served from the root of their host, so a path here produces links nothing will
+/// answer. The host-based isolation check would still match, leaving no symptom to trace back.
+fn validate_origin_url(label: &str, value: &str) -> anyhow::Result<()> {
+    let parsed = validate_base_url(label, value)?;
+    if !matches!(parsed.path(), "" | "/") {
+        anyhow::bail!("{label} must be a scheme and host only, without a path");
     }
     Ok(())
 }
@@ -454,6 +466,26 @@ fn validate_scanning(scanning: &ScanningConfig) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Midden serves files at the root of the file host, so a base URL carrying a path would hand
+    /// out links the router cannot answer — and the isolation check, which compares hosts, would
+    /// still match, so nothing else would flag it.
+    #[test]
+    fn the_file_base_url_must_be_a_bare_origin() {
+        let mut config = AppConfig::default();
+        config.delivery.public_file_base_url = Some("https://cdn.example.test/files".to_string());
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("delivery.public_file_base_url"), "{err}");
+
+        for accepted in [
+            "https://cdn.example.test",
+            "https://cdn.example.test/",
+            "http://localhost:8080",
+        ] {
+            config.delivery.public_file_base_url = Some(accepted.to_string());
+            validate(&config).unwrap_or_else(|err| panic!("{accepted:?}: {err}"));
+        }
+    }
 
     #[test]
     fn css_colors_accept_the_shapes_the_ui_offers() {
